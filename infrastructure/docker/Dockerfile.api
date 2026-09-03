@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /cloudcare
+
+# Install Python dependencies
+COPY apps/api/requirements.txt apps/api/requirements.txt
+RUN pip install --no-cache-dir -r apps/api/requirements.txt
+
+# Copy the entire repo so all packages (apps/, services/, packages/) are importable
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

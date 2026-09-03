@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+pip_install*.log
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+apps/web/.next/
+apps/web/node_modules/
+
+# Env files — never commit real secrets, only .env.example / .env.local.example
+.env
+.env.local
+apps/api/.env
+apps/web/.env.local
+
+# FOCUS sample data (large, separately licensed — see scripts/seed_focus_sample.py)
+scripts/data/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
