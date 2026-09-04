@@ -8,7 +8,9 @@ type PageProps = {
 };
 
 export function generateStaticParams() {
-  return marketingPages.map((page) => ({ slug: page.slug }));
+  return marketingPages
+    .filter((page) => page.slug !== "cloud-cost-control")
+    .map((page) => ({ slug: page.slug }));
 }
 
 export async function generateMetadata({ params }: PageProps) {

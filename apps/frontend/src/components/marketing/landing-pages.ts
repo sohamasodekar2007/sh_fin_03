@@ -25,6 +25,18 @@ export type MarketingPage = {
   summary: string;
   metric: string;
   metricLabel: string;
+  narrative?: string[];
+  serviceBreakdown?: Array<{
+    service: string;
+    signal: string;
+    action: string;
+    savings: string;
+  }>;
+  savingsPlays?: Array<{
+    title: string;
+    detail: string;
+    impact: string;
+  }>;
   rows: Array<{ label: string; value: string }>;
   proof: Array<{ label: string; value: string }>;
   pillars: Array<{ icon: LucideIcon; title: string; body: string }>;
@@ -39,14 +51,64 @@ export const marketingPages: MarketingPage[] = [
     title: "Find waste, prove impact, and reduce cloud cost before the invoice lands.",
     accent: "Spend does not wait for month-end reports.",
     summary:
-      "CloudCare continuously watches EC2, EBS, RDS, S3, Lambda, CloudFront, DynamoDB, and more. It turns raw usage into prioritized savings moves your team can trust.",
+      "CloudCare continuously watches EC2, EBS, RDS, S3, Lambda, CloudFront, DynamoDB, and more. It turns raw usage into prioritized savings moves your team can trust, with every recommendation tied to evidence, expected monthly impact, and a controlled execution path.",
     metric: "$42.8K",
     metricLabel: "validated monthly savings pipeline",
+    narrative: [
+      "Cloud cost control is not only about seeing a high bill. The real work is finding which exact resources are wasting money, proving that the waste is safe to remove, and turning the recommendation into an approved action before another billing cycle passes.",
+      "CloudCare builds that operating layer. It combines inventory, utilization metrics, cost data, tags, dependency context, and policy checks so finance can see the money, engineering can see the resource, and leadership can see the decision that needs to be made.",
+    ],
+    serviceBreakdown: [
+      {
+        service: "EC2 and Auto Scaling",
+        signal: "Idle instances, low CPU, stale launch templates, unused capacity",
+        action: "Stop, resize, schedule, or rebalance capacity after dependency checks",
+        savings: "$13.4K",
+      },
+      {
+        service: "RDS and databases",
+        signal: "Oversized classes, low connection pressure, backup and storage drift",
+        action: "Right-size instances, tune storage, and flag risky database changes for review",
+        savings: "$9.7K",
+      },
+      {
+        service: "S3, EBS, and storage",
+        signal: "Unattached volumes, cold objects, stale snapshots, high-cost storage classes",
+        action: "Delete orphaned assets, move cold data, and preserve rollback evidence",
+        savings: "$11.3K",
+      },
+      {
+        service: "Lambda, CloudFront, DynamoDB",
+        signal: "Traffic mismatch, provisioned capacity gaps, cache and request-cost anomalies",
+        action: "Recommend configuration changes with expected cost and risk context",
+        savings: "$8.4K",
+      },
+    ],
+    savingsPlays: [
+      {
+        title: "Detect waste while it is still small",
+        detail:
+          "Hourly and daily signals catch idle compute, unattached storage, abnormal growth, and underused managed services before the monthly invoice hides the source.",
+        impact: "Faster response",
+      },
+      {
+        title: "Prioritize by money and confidence",
+        detail:
+          "Recommendations are scored by projected savings, operational risk, service dependency, policy outcome, and owner context so the team works on the highest-value moves first.",
+        impact: "Cleaner queue",
+      },
+      {
+        title: "Execute only after approval",
+        detail:
+          "CloudCare can prepare safe actions, but production-changing operations remain approval-gated with an audit trail and a clear before-and-after record.",
+        impact: "Controlled savings",
+      },
+    ],
     rows: [
       { label: "Idle EC2 capacity", value: "$13.4K" },
       { label: "Over-sized RDS", value: "$9.7K" },
-      { label: "Cold storage moves", value: "$7.2K" },
-      { label: "Unattached volumes", value: "$4.1K" },
+      { label: "Storage optimization", value: "$11.3K" },
+      { label: "Serverless and edge", value: "$8.4K" },
     ],
     proof: [
       { label: "Coverage", value: "8+ AWS cost surfaces" },
