@@ -9,7 +9,15 @@ type PageProps = {
 
 export function generateStaticParams() {
   return marketingPages
-    .filter((page) => page.slug !== "cloud-cost-control")
+    .filter(
+      (page) =>
+        ![
+          "cloud-cost-control",
+          "autonomous-finops-agents",
+          "governance-security",
+          "executive-command-center",
+        ].includes(page.slug)
+    )
     .map((page) => ({ slug: page.slug }));
 }
 
