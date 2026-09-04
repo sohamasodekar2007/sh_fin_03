@@ -1,31 +1,56 @@
 """
-FastAPI as a trusting resource server (spec section 2).
+Password hashing + JWT helpers.
 
-FastAPI never mints a JWT and never sees a password — NextAuth is the sole
-identity authority. This module only decodes and validates the HS256 JWT
-NextAuth signs with NEXTAUTH_SECRET (duplicated into this service's .env),
-matching the `jwt` callback shape NextAuth produces by default: `sub`
-(user id), `email`, `name`, `picture`, and whatever custom claims
-apps/web/lib/auth.ts adds (`provider`, `provider_account_id`).
+Replaces the old auth.py placeholder comment block — this is the real
+implementation: bcrypt for password storage, python-jose for signed,
+expiring JWTs. Nothing here talks to MongoDB; routers own the DB calls.
 """
 
-from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 
 from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 from apps.api.config import get_settings
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def decode_nextauth_jwt(token: str) -> dict | None:
-    """Returns the decoded claims, or None if the token is invalid/expired/
-    signed with the wrong secret."""
+
+def hash_password(plain_password: str) -> str:
+    return pwd_context.hash(plain_password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(user_id: str, tenant_id: str) -> str:
+    settings = get_settings()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
+    payload = {"sub": user_id, "tenant_id": tenant_id, "exp": expire}
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def decode_access_token(token: str) -> dict | None:
+    """Returns the decoded payload, or None if the token is invalid/expired."""
+    settings = get_settings()
+    try:
+        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except JWTError:
+        return None
+
+
+def decode_access_token_allow_expired(token: str) -> dict | None:
+    """Same as decode_access_token, but ignores expiry — used only by the
+    /v1/auth/refresh endpoint so a *recently* expired token can still be
+    exchanged for a new one, without accepting a forged/tampered token."""
     settings = get_settings()
     try:
         return jwt.decode(
             token,
-            settings.nextauth_secret,
-            algorithms=[settings.jwt_algorithm],
-            options={"verify_aud": False},
+            settings.jwt_secret,
+            algorithms=["HS256"],
+            options={"verify_exp": False},
         )
     except JWTError:
         return None

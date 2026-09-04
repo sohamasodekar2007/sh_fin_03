@@ -4,34 +4,46 @@ uvicorn[standard]==0.30.1
 pydantic==2.7.4
 pydantic-settings==2.3.4
 python-dotenv==1.0.1
-websockets==12.0
+httpx==0.27.0
 
 # MongoDB
 motor==3.4.0
 pymongo==4.6.3
 
-# Auth — FastAPI only decodes NextAuth's JWT, it never mints one
+# Auth
 python-jose[cryptography]==3.3.0
-
-# Credential encryption at rest (AES-256-GCM)
-cryptography==42.0.8
+passlib[bcrypt]==1.7.4
+webauthn==2.2.0
+pyotp==2.9.0
+bcrypt==4.0.1
 
 # Agentic orchestration
 langgraph==0.1.5
 langchain-core==0.2.9
 
-# ML — Analyzer Agent's IsolationForest layer
-scikit-learn==1.5.2
-numpy==1.26.4
+# Scheduling — hourly Monitor -> Analyzer -> Decision -> Supervisor pipeline
+apscheduler==3.10.4
 
-# LLM — Decision Agent reasoning + chat function-calling
-openai==1.35.13
-
-# Cloud SDK
+# AWS SDK
 boto3==1.34.131
 
+# Azure SDK
+azure-identity==1.17.1
+azure-mgmt-compute==31.0.0
+azure-mgmt-costmanagement==4.0.1
+azure-mgmt-resource==23.1.1
+azure-monitor-query==1.3.0
+
+# VPS SSH collection
+paramiko==3.4.0
+
+# LLM — GPT-4o (Decision agent, Phase 7 chatbot)
+openai==1.35.13
+
 # Forecasting
-statsmodels==0.14.2
+statsmodels
+numpy
 
 # Tests
 pytest
+moto[ec2]==5.2.3

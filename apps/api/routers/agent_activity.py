@@ -1,49 +1,59 @@
-"""GET /v1/agent-activity — REST fallback for clients not on the
-/ws/agent-feed WebSocket (apps/api/ws/agent_feed.py)."""
-
-from __future__ import annotations
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 
-from apps.api import mock_data
 from apps.api.dependencies import get_current_user
-from apps.api.pipeline import get_last_run
-from packages.schemas.schemas import UserInDB
+from packages.schemas.schemas import AgentActivityEntry
+from services.agent_log import list_agent_runs
 
-router = APIRouter(prefix="/v1", tags=["agent-activity"])
-
-
-@router.get("/agent-activity")
-async def agent_activity(user: UserInDB = Depends(get_current_user)):
-    run = get_last_run(user.tenant_id)
-    if not run:
-        return [e.model_dump() for e in mock_data.AGENT_ACTIVITY]
-
-    return [
-        {
-            "id": f"{event['agent']}-{event['at']}",
-            "agent": event["agent"],
-            "message": _summarize(event),
-            "timestamp": event["at"],
-        }
-        for event in run.get("trace", [])
-    ]
+router = APIRouter(prefix="/v1/agent-activity", tags=["agent-activity"])
 
 
-def _summarize(event: dict) -> str:
-    agent = event["agent"]
-    summary = event.get("summary", {})
-    if agent == "Monitor":
-        return f"Scanned {summary.get('resources_scanned', 0)} resources across {len(summary.get('providers', {}))} provider(s)"
-    if agent == "Analyzer":
-        return f"Flagged {summary.get('findings', 0)} finding(s) across {summary.get('resources_evaluated', 0)} resources"
-    if agent == "Decision":
-        return f"Proposed {summary.get('proposals', 0)} action(s)"
-    if agent == "Supervisor":
-        outcomes = summary.get("outcomes", {})
-        return f"Auto-approved {outcomes.get('auto_approved', 0)}, human review {outcomes.get('human_review', 0)}, blocked {outcomes.get('blocked', 0)}"
-    if agent == "Executor":
-        return f"Executed {summary.get('executed', 0)} action(s), {summary.get('simulated', 0)} simulated"
-    if agent == "Verifier":
-        return f"Verified {summary.get('verified', 0)} action(s) — ${summary.get('total_realized_monthly_savings_usd', 0)}/mo realized"
-    return str(summary)
+def _format_timestamp(value: datetime | str) -> str:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.strftime("%H:%M:%S")
+
+
+def _to_entry(doc: dict) -> AgentActivityEntry:
+    output_summary = doc.get("output_summary") or {}
+    message = output_summary.get("message")
+    if not message:
+        if doc.get("status") == "failed":
+            message = f"{doc.get('agent')} run failed: {doc.get('error') or 'unknown error'}"
+        else:
+            message = f"{doc.get('agent')} run completed"
+
+    return AgentActivityEntry(
+        id=doc.get("log_id", ""),
+        agent=doc.get("agent", "Monitor"),
+        message=message,
+        timestamp=_format_timestamp(doc.get("started_at")),
+        status=doc.get("status", "success"),
+        duration_ms=doc.get("duration_ms", 0),
+        payload=doc.get("payload") or {},
+    )
+
+
+@router.get("", response_model=list[AgentActivityEntry])
+async def list_agent_activity(
+    run_id: str | None = None,
+    agent: str | None = None,
+    limit: int = 100,
+    current_user: dict = Depends(get_current_user),
+) -> list[AgentActivityEntry]:
+    """Reads the real per-run audit trail from the `agent_runs` collection
+    (services/agent_log.py) — every Monitor/Analyzer/Decision/Supervisor/
+    Executor invocation logs one document there, tenant-scoped."""
+    docs = await list_agent_runs(
+        tenant_id=current_user["tenant_id"],
+        run_id=run_id,
+        agent=agent,  # type: ignore[arg-type]
+        limit=limit,
+    )
+    return [_to_entry(doc) for doc in docs]

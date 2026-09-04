@@ -29,6 +29,16 @@ class Finding:
     confidence: float
     evidence: dict[str, Any]
 
+    # "billable" (default): the resource has a real invoice, so acting on
+    # this finding produces a real dollar saving (AWS, Azure).
+    # "reclaimable_capacity": a fixed-price server (VPS) is owed its
+    # monthly cost regardless of what runs on it — stopping something
+    # frees capacity, not money. See services/focus/mappers/vps.py's
+    # module docstring for why this distinction exists.
+    savings_type: str = "billable"
+    reclaimable_vcpu: float | None = None
+    reclaimable_memory_mb: float | None = None
+
     def to_dict(self, resource_id: str) -> dict[str, Any]:
         return {
             "resource_id": resource_id,
@@ -36,4 +46,7 @@ class Finding:
             "severity": self.severity,
             "confidence": self.confidence,
             "evidence": self.evidence,
+            "savings_type": self.savings_type,
+            "reclaimable_vcpu": self.reclaimable_vcpu,
+            "reclaimable_memory_mb": self.reclaimable_memory_mb,
         }

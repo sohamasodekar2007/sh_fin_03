@@ -1,0 +1,324 @@
+@import "tailwindcss" source(none);
+@source "../";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark, .dark *));
+
+/*
+ * FINANCE COMMAND CENTER THEME — ported verbatim from the
+ * remix-of-finance-dashboard-main template's src/styles.css (Phase 8).
+ * Machined enterprise finance UI. Light is the default; dark is the option.
+ *
+ * Accent: one indigo, darkened on light surfaces so text and chart strokes
+ * clear WCAG AA. Costs get one desaturated ember hue, positives one teal.
+ * Everything else is neutral. No decoration, no texture.
+ *
+ * ONE deliberate deviation from the source file: the three --font-* lines
+ * below reference the CSS variables next/font/google injects (see
+ * src/app/layout.tsx) instead of a bare literal font stack, so the actual
+ * webfont files next/font loads are what these tokens resolve to. Nothing
+ * else in this file differs from the template.
+ */
+
+@theme inline {
+  --font-display: var(--font-bricolage-grotesque), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter-tight), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* domain tokens */
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-hairline: var(--hairline);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-faint: var(--ink-faint);
+  --color-signal: var(--signal);
+  --color-signal-soft: var(--signal-soft);
+  --color-signal-deep: var(--signal-deep);
+  --color-ember: var(--ember);
+  --color-ember-soft: var(--ember-soft);
+  --color-mint: var(--mint);
+  --color-graphite: var(--graphite);
+}
+
+/* ---------- LIGHT (default) ---------- */
+:root {
+  --radius: 0.5rem;
+
+  --background: oklch(0.977 0.004 85);
+  --foreground: oklch(0.215 0.012 266);
+
+  --surface: oklch(1 0 0);
+  --surface-raised: oklch(0.982 0.003 85);
+  --hairline: oklch(0.888 0.006 266);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.215 0.012 266);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.215 0.012 266);
+
+  --primary: oklch(0.47 0.158 266);
+  --primary-foreground: oklch(0.99 0.002 260);
+  --secondary: oklch(0.955 0.004 266);
+  --secondary-foreground: oklch(0.26 0.012 266);
+  --muted: oklch(0.958 0.004 266);
+  --muted-foreground: oklch(0.52 0.012 266);
+  --accent: oklch(0.945 0.014 266);
+  --accent-foreground: oklch(0.26 0.012 266);
+  --destructive: oklch(0.508 0.178 27);
+  --destructive-foreground: oklch(0.99 0.002 260);
+  --border: oklch(0.912 0.005 266);
+  --input: oklch(0.9 0.005 266);
+  --ring: oklch(0.47 0.158 266);
+
+  --ink-dim: oklch(0.44 0.012 266);
+  --ink-faint: oklch(0.545 0.012 266);
+
+  /* the one accent — darkened for contrast on white */
+  --signal: oklch(0.475 0.158 266);
+  --signal-soft: oklch(0.575 0.14 266);
+  --signal-deep: oklch(0.365 0.135 268);
+
+  /* cost hue */
+  --ember: oklch(0.515 0.135 42);
+  --ember-soft: oklch(0.63 0.11 44);
+
+  --mint: oklch(0.475 0.105 168);
+  --graphite: oklch(0.6 0.012 266);
+
+  /* chart + chrome */
+  --grid-line: oklch(0.855 0.006 266);
+  --axis-line: oklch(0.74 0.008 266);
+  --connector: oklch(0.7 0.01 266);
+  /* origin stop for cost ribbons; neutral on light, warmed on dark */
+  --cost-origin: var(--graphite);
+  --band-outer: color-mix(in oklab, var(--signal) 9%, var(--surface));
+  --band-inner: color-mix(in oklab, var(--signal) 20%, var(--surface));
+  --band-stroke: color-mix(in oklab, var(--signal) 42%, transparent);
+  --panel-topline: transparent;
+  --shadow-card: 0 1px 2px oklch(0.22 0.02 266 / 0.06), 0 1px 8px oklch(0.22 0.02 266 / 0.05);
+  --control-on-fg: oklch(0.99 0.002 260);
+  --ribbon-rest: 0.42;
+  --ribbon-lit: 0.8;
+  --ribbon-dim: 0.09;
+}
+
+/* ---------- DARK (option) ---------- */
+.dark {
+  --background: oklch(0.145 0.012 268);
+  --foreground: oklch(0.955 0.004 260);
+
+  --surface: oklch(0.185 0.013 267);
+  --surface-raised: oklch(0.222 0.015 266);
+  --hairline: oklch(0.32 0.016 266);
+
+  --card: oklch(0.185 0.013 267);
+  --card-foreground: oklch(0.955 0.004 260);
+  --popover: oklch(0.205 0.014 267);
+  --popover-foreground: oklch(0.955 0.004 260);
+
+  --primary: oklch(0.62 0.198 268);
+  --primary-foreground: oklch(0.99 0.002 260);
+  --secondary: oklch(0.245 0.016 266);
+  --secondary-foreground: oklch(0.93 0.005 260);
+  --muted: oklch(0.235 0.014 266);
+  --muted-foreground: oklch(0.66 0.014 262);
+  --accent: oklch(0.28 0.03 268);
+  --accent-foreground: oklch(0.96 0.004 260);
+  --destructive: oklch(0.6 0.18 28);
+  --destructive-foreground: oklch(0.98 0.002 260);
+  --border: oklch(0.29 0.015 266);
+  --input: oklch(0.29 0.015 266);
+  --ring: oklch(0.62 0.198 268);
+
+  --ink-dim: oklch(0.68 0.013 262);
+  --ink-faint: oklch(0.5 0.013 262);
+
+  --signal: oklch(0.68 0.185 264);
+  --signal-soft: oklch(0.63 0.175 266);
+  --signal-deep: oklch(0.42 0.13 268);
+
+  /* cost hue: raised chroma and lightness so ribbons hold against the
+     near-black background instead of sinking into brown */
+  --ember: oklch(0.72 0.175 48);
+  --ember-soft: oklch(0.62 0.155 36);
+
+  --mint: oklch(0.8 0.165 168);
+
+  --graphite: oklch(0.47 0.014 262);
+
+  --grid-line: oklch(0.32 0.016 266);
+  --axis-line: oklch(0.4 0.016 266);
+  --connector: oklch(0.42 0.016 266);
+  --cost-origin: oklch(0.56 0.09 52);
+  --band-outer: color-mix(in oklab, var(--signal) 12%, var(--surface));
+  --band-inner: color-mix(in oklab, var(--signal) 24%, var(--surface));
+  --band-stroke: color-mix(in oklab, var(--signal) 45%, transparent);
+  --panel-topline: oklch(1 0 0 / 0.05);
+  --shadow-card: none;
+  --control-on-fg: oklch(0.145 0.012 268);
+  --ribbon-rest: 0.42;
+  --ribbon-lit: 0.88;
+  --ribbon-dim: 0.07;
+
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    background-color: var(--color-background);
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+}
+
+/* ---------- utilities ---------- */
+
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "zero" 1;
+  letter-spacing: -0.03em;
+}
+
+@utility eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-ink-faint);
+}
+
+@utility panel {
+  position: relative;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+@utility hairline-top {
+  box-shadow:
+    inset 0 1px 0 0 var(--panel-topline),
+    var(--shadow-card);
+}
+
+/* ---------- page-load orchestration ---------- */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes sweep {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@utility stage {
+  opacity: 0;
+  animation: rise 0.62s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@utility sweep-in {
+  transform-origin: left center;
+  animation: sweep 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-hairline) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-hairline);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* travelling flow dash along Sankey ribbons */
+@keyframes flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -58;
+  }
+}

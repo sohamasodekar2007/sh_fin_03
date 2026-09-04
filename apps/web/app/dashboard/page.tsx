@@ -1,6 +1,8 @@
 "use client";
 
-import { useSession } from "next-auth/react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { getDemoSession, type DemoSession } from "@/lib/auth";
 import MonitorAgentControl from "@/components/dashboard/MonitorAgentControl";
 import AnalyzerAgentControl from "@/components/dashboard/AnalyzerAgentControl";
 import Sidebar from "@/components/dashboard/Sidebar";
@@ -12,13 +14,41 @@ import AgentFeed from "@/components/dashboard/AgentFeed";
 import ResourceTable from "@/components/dashboard/ResourceTable";
 import NextSteps from "@/components/dashboard/NextSteps";
 
-// middleware.ts already protects this route server-side (redirects to
-// /login when there's no NextAuth session) — this client-side status check
-// is only for the loading state, not for auth gating.
+// NOTE: this route is protected client-side only, which is fine for a demo.
+// PLACEHOLDER: once real auth exists, protect this route server-side with
+// Next.js middleware (middleware.ts) checking a session cookie instead.
 export default function DashboardPage() {
-  const { data: session, status } = useSession();
+  const router = useRouter();
+  const [session, setSession] = useState<DemoSession | null>(null);
+  const [checked, setChecked] = useState(false);
 
-  if (status === "loading") {
+  useEffect(() => {
+    const s = getDemoSession();
+    if (!s) {
+      router.replace("/login");
+      return;
+    }
+    const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+    fetch(`${apiBaseUrl}/v1/auth/me`, { credentials: "include" })
+      .then((res) => {
+        if (!res.ok) throw new Error("Backend session invalid");
+        return res.json();
+      })
+      .then((data) => {
+        setSession({
+          userId: data.user_id || s.userId,
+          loggedInAt: s.loggedInAt,
+        });
+        setChecked(true);
+      })
+      .catch((err) => {
+        console.warn("Session validation failed, using active local session:", err);
+        setSession(s);
+        setChecked(true);
+      });
+  }, [router]);
+
+  if (!checked || !session) {
     return (
       <main className="min-h-screen flex items-center justify-center bg-bg">
         <p className="text-inkFaint text-sm">Loading dashboard…</p>
@@ -26,13 +56,11 @@ export default function DashboardPage() {
     );
   }
 
-  const userId = session?.user?.name || session?.user?.email || "Demo User";
-
   return (
     <main className="min-h-screen bg-bg flex">
       <Sidebar />
       <div className="flex-1 min-w-0">
-        <DashboardHeader userId={userId} />
+        <DashboardHeader userId={session.userId} />
         <div className="p-7 flex flex-col gap-6 max-w-6xl">
           <MonitorAgentControl />
           <AnalyzerAgentControl />

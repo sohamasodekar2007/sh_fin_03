@@ -16,26 +16,19 @@ import boto3
 from apps.api.config import get_settings
 
 
-def assumed_session(run_id: str, role_arn: str | None = None, external_id: str | None = None) -> boto3.Session:
-    """Assume a customer's read-only role. `role_arn`/`external_id` come
-    from that customer's CloudAccount record; when omitted, falls back to
-    the single dev-account role configured in .env (AWS_READ_ROLE_ARN /
-    AWS_EXTERNAL_ID) for local testing without a full onboarding flow."""
+def assumed_session(run_id: str) -> boto3.Session:
     settings = get_settings()
-    role_arn = role_arn or settings.aws_read_role_arn
-    external_id = external_id or settings.aws_external_id
-    if not role_arn or not external_id:
+    if not settings.aws_read_role_arn or not settings.aws_external_id:
         raise RuntimeError(
-            "No role_arn/external_id given and AWS_READ_ROLE_ARN / "
-            "AWS_EXTERNAL_ID are not set — fill them in apps/api/.env "
-            "before calling assumed_session()."
+            "AWS_READ_ROLE_ARN / AWS_EXTERNAL_ID are not set — fill them in "
+            "apps/api/.env.example before calling assumed_session()."
         )
 
     sts = boto3.client("sts")
     response = sts.assume_role(
-        RoleArn=role_arn,
+        RoleArn=settings.aws_read_role_arn,
         RoleSessionName=f"cloudcare-{run_id[:12]}",
-        ExternalId=external_id,
+        ExternalId=settings.aws_external_id,
         DurationSeconds=3600,
     )
     creds = response["Credentials"]

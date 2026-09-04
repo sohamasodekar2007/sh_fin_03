@@ -8,7 +8,10 @@ from packages.schemas.cloud_metrics import DailyCost, EC2CpuMetric
 
 
 class CollectionIssue(BaseModel):
-    source: Literal["ec2", "cloudwatch", "cost_explorer"]
+    source: Literal[
+        "ec2", "ebs", "cloudwatch", "cost_explorer",
+        "azure_vm", "azure_disk", "azure_monitor", "azure_cost_management",
+    ]
     error_type: str
     message: str
     retryable: bool = True

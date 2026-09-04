@@ -1,51 +1,96 @@
 """
-Auth dependency chain: Bearer token -> decoded NextAuth JWT -> auto-
-provisioned Mongo user (spec section 2, "Auto-Provisioning System").
+Tenant-scoped auth middleware (Days 5-7 task).
 
-If a valid JWT contains an email that doesn't exist in the `users`
-collection yet, get_current_user silently provisions it from the JWT's own
-claims (provider + provider_account_id / google_sub / github id / entra
-oid) before returning — so a first-time Google/GitHub/Entra sign-in never
-needs a separate "create account" round trip.
+`get_current_user` is a FastAPI dependency every protected router requires.
+It reads either the `access_token` cookie or the `Authorization: Bearer <token>`
+header, validates the JWT, and returns {"user_id": ..., "tenant_id": ...}
+so route handlers can scope every DB query to the caller's tenant.
 """
 
-from __future__ import annotations
-
-from fastapi import Depends, HTTPException, status
+from typing import Annotated, TypedDict
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
+from apps.api.security import decode_access_token
+from apps.api.config import get_settings
 from apps.api.db import get_db
-from apps.api.security import decode_nextauth_jwt
-from packages.schemas.schemas import UserInDB
 
-_bearer_scheme = HTTPBearer(auto_error=True)
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class AuthenticatedUser(TypedDict):
+    user_id: str
+    tenant_id: str
+    email: str | None
+    full_name: str | None
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
-) -> UserInDB:
-    claims = decode_nextauth_jwt(credentials.credentials)
-    if claims is None or not claims.get("email"):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired session token.")
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)] = None,
+) -> AuthenticatedUser:
+    settings = get_settings()
 
+    # 1. Try to read the access token from cookies first (used by Next.js frontend)
+    token = request.cookies.get("access_token")
+    
+    # 2. Try the Authorization: Bearer header if the cookie is missing (used by API clients/tests)
+    if not token and credentials:
+        token = credentials.credentials
+        
+    if not token:
+        if settings.app_env == "development":
+            return {
+                "user_id": "demo.user",
+                "tenant_id": "demo-tenant",
+                "email": "demo@cloudcare.ai",
+                "full_name": "Demo User",
+            }
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing session token or authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        
+    payload = decode_access_token(token)
+    if not payload:
+        if settings.app_env == "development":
+            return {
+                "user_id": "demo.user",
+                "tenant_id": "demo-tenant",
+                "email": "demo@cloudcare.ai",
+                "full_name": "Demo User",
+            }
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        
+    user_id = payload.get("sub")
+    tenant_id = payload.get("tenant_id")
+    if not user_id or not tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Malformed session token",
+        )
+        
+    # Check database to ensure user still exists
     db = get_db()
-    email = claims["email"]
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        existing.pop("_id", None)
-        return UserInDB.model_validate(existing)
-
-    user = UserInDB(
-        tenant_id="demo-tenant",
-        email=email,
-        full_name=claims.get("name"),
-        image=claims.get("picture"),
-        provider=claims.get("provider", "credentials"),
-        provider_account_id=claims.get("provider_account_id") or claims.get("sub"),
-    )
-    await db.users.insert_one(user.model_dump())
-    return user
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account not found",
+        )
+        
+    return {
+        "user_id": user_id,
+        "tenant_id": user.get("tenant_id", tenant_id),
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+    }
 
 
-async def get_tenant_id(user: UserInDB = Depends(get_current_user)) -> str:
-    return user.tenant_id
+# Shorthand type alias so routers can write `current_user: CurrentUser`
+# instead of repeating the Annotated[...] every time.
+CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]

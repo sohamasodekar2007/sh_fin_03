@@ -22,7 +22,8 @@ async function safeFetch<T>(path: string, fallback: T): Promise<T> {
   try {
     const res = await fetch(`${BASE_URL}${path}`, {
       cache: "no-store",
-      headers: { ...(await getAuthHeaders()) },
+      credentials: "include",
+      headers: { ...getAuthHeaders() },
     });
     if (!res.ok) throw new Error(`Request failed: ${res.status}`);
     return (await res.json()) as T;

@@ -1,10 +1,14 @@
 "use client";
 
-import { signOut } from "next-auth/react";
+import { useRouter } from "next/navigation";
+import { demoLogout } from "@/lib/auth";
 
 export default function DashboardHeader({ userId }: { userId: string }) {
+  const router = useRouter();
+
   const handleLogout = () => {
-    signOut({ callbackUrl: "/" });
+    demoLogout();
+    router.push("/");
   };
 
   const initials = userId

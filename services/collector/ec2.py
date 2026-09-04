@@ -1,30 +1,25 @@
 """
-EC2 + EBS inventory collector — real boto3 implementation.
+EC2 inventory collector — PLACEHOLDER.
 
-Read-only: describe_instances / describe_volumes only. Requires the caller
-to pass a boto3 Session already scoped to the customer's read-only role
-(see packages/aws/aws_session.py::assumed_session).
+TODO: implement using boto3, per blueprint section 2.1 (Cloud Integration
+layer). Example shape once implemented:
+
+    def list_instances(session, region: str) -> list[dict]:
+        ec2 = session.client("ec2", region_name=region)
+        paginator = ec2.get_paginator("describe_instances")
+        instances = []
+        for page in paginator.paginate():
+            for reservation in page["Reservations"]:
+                instances.extend(reservation["Instances"])
+        return instances
+
+Normalize the raw boto3 response into the Resource schema
+(app/models/schemas.py) before returning it to the orchestrator.
 """
 
-from __future__ import annotations
 
-from typing import Any
-
-
-def list_instances(session, region: str) -> list[dict[str, Any]]:
-    ec2 = session.client("ec2", region_name=region)
-    paginator = ec2.get_paginator("describe_instances")
-    instances: list[dict[str, Any]] = []
-    for page in paginator.paginate():
-        for reservation in page["Reservations"]:
-            instances.extend(reservation["Instances"])
-    return instances
-
-
-def list_unattached_volumes(session, region: str) -> list[dict[str, Any]]:
-    ec2 = session.client("ec2", region_name=region)
-    paginator = ec2.get_paginator("describe_volumes")
-    volumes: list[dict[str, Any]] = []
-    for page in paginator.paginate(Filters=[{"Name": "status", "Values": ["available"]}]):
-        volumes.extend(page["Volumes"])
-    return volumes
+def list_instances(session, region: str) -> list[dict]:
+    raise NotImplementedError(
+        "Wire this up to a real AWS sandbox account — see the module "
+        "docstring for the boto3 implementation."
+    )

@@ -12,14 +12,15 @@ export default function MonitorAgentControl() {
   const [showJsonModal, setShowJsonModal] = useState(false);
 
   useEffect(() => {
-    getAuthHeaders().then((headers) =>
-      fetch(`${BASE_URL}/v1/observation/latest`, { headers })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data) setObservationData(data);
-        })
-        .catch((err) => console.warn("Failed to fetch latest observation:", err))
-    );
+    fetch(`${BASE_URL}/v1/agent/observe/latest`, {
+      credentials: "include",
+      headers: { ...getAuthHeaders() },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setObservationData(data);
+      })
+      .catch((err) => console.warn("Failed to fetch latest observation:", err));
   }, []);
 
   const steps = [
@@ -40,19 +41,19 @@ export default function MonitorAgentControl() {
     }
 
     try {
-      const res = await fetch(`${BASE_URL}/v1/runs`, {
+      const res = await fetch(`${BASE_URL}/v1/agent/observe`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          ...(await getAuthHeaders()),
+          ...getAuthHeaders(),
         },
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.detail || `Scan request failed with status ${res.status}`);
       }
-      const observationRes = await fetch(`${BASE_URL}/v1/observation/latest`, { headers: await getAuthHeaders() });
-      setObservationData(observationRes.ok ? await observationRes.json() : data);
+      setObservationData(data);
     } catch (err) {
       console.warn("Monitor Agent scan error:", err);
     } finally {

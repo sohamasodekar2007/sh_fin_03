@@ -1,73 +1,179 @@
-"""
-Supervisor Agent (spec section 4.4) — the compliance gatekeeper. Wraps the
-deterministic services.policy.engine matrix around each ActionProposal the
-Decision Agent produced, translating engine.PolicyResult into the audited
-PolicyDecision shape the Executor's SimulatedExecutor requires before it
-will act on anything.
-"""
+from collections.abc import Callable, Mapping
+from typing import Any
 
-from __future__ import annotations
+from packages.schemas.policy import (
+    ActionProposal,
+    PolicyDecision,
+)
 
-from packages.schemas.policy import ActionProposal, PolicyDecision
-from services.policy import engine
 
-_POLICY_VERSION = "policy-engine-v2"
+PolicyEvaluator = Callable[
+    [dict[str, Any]],
+    Mapping[str, Any],
+]
 
 
 class PolicyAdapter:
-    """Safety adapter around the deterministic policy engine — the only
-    thing in the pipeline allowed to set `outcome` / `risk_score`."""
+    """
+    Safety adapter around the existing deterministic policy engine.
+    """
 
-    def __init__(self, execution_enabled: bool = False) -> None:
+    ALLOWED_ACTION_TEMPLATES = {
+        "ec2.stop.v1",
+    }
+
+    def __init__(
+        self,
+        evaluator: PolicyEvaluator,
+        execution_enabled: bool = False,
+        execution_mode: str = "simulation",
+    ) -> None:
+        if execution_mode != "simulation":
+            raise ValueError(
+                "Only simulation mode is supported"
+            )
+
+        self.evaluator = evaluator
         self.execution_enabled = execution_enabled
+        self.execution_mode = execution_mode
 
-    def evaluate(self, proposal: ActionProposal) -> PolicyDecision:
-        try:
-            result = engine.evaluate(
-                environment=proposal.environment,
-                risk_level=proposal.risk_level,
-                template_id=proposal.action_template,
-                has_owner_tag=bool(proposal.parameters.get("has_owner_tag", False)),
-                is_protected=bool(proposal.parameters.get("is_protected", False)),
-            )
-        except Exception:  # noqa: BLE001
-            return PolicyDecision(
-                proposal_id=proposal.proposal_id,
-                outcome="blocked",
-                risk_score=1.0,
-                reason_codes=["POLICY_ENGINE_ERROR"],
-                reason="The policy engine raised evaluating this proposal — blocking as a fail-safe.",
-                policy_version=_POLICY_VERSION,
-            )
+    @staticmethod
+    def _normalize_reason_codes(
+        raw_reasons: Any,
+    ) -> list[str]:
+        if isinstance(raw_reasons, str):
+            return [raw_reasons]
 
-        if not result.approved:
-            reason_code = "UNKNOWN_ACTION_TEMPLATE" if "template" in result.reason.lower() else "PROTECTED_RESOURCE"
-            return PolicyDecision(
-                proposal_id=proposal.proposal_id,
-                outcome="blocked",
-                risk_score=result.risk_score,
-                reason_codes=[reason_code],
-                reason=result.reason,
-                policy_version=_POLICY_VERSION,
-            )
+        if isinstance(raw_reasons, list):
+            return [
+                str(reason)
+                for reason in raw_reasons
+            ]
 
-        if result.auto_execute:
-            return PolicyDecision(
-                proposal_id=proposal.proposal_id,
-                outcome="auto_approved",
-                risk_score=result.risk_score,
-                reason_codes=["LOW_RISK_AUTO_APPROVED"],
-                reason=result.reason,
-                policy_version=_POLICY_VERSION,
-                simulation_allowed=self.execution_enabled,
-                live_execution_allowed=False,
-            )
+        return []
 
+    @staticmethod
+    def _decision(
+        proposal: ActionProposal,
+        outcome: str,
+        reason_codes: list[str],
+        policy_version: str,
+        simulation_allowed: bool = False,
+    ) -> PolicyDecision:
         return PolicyDecision(
             proposal_id=proposal.proposal_id,
-            outcome="human_review",
-            risk_score=result.risk_score,
-            reason_codes=["REQUIRES_HUMAN_APPROVAL"],
-            reason=result.reason,
-            policy_version=_POLICY_VERSION,
+            outcome=outcome,
+            reason_codes=reason_codes,
+            policy_version=policy_version,
+            simulation_allowed=simulation_allowed,
+            live_execution_allowed=False,
+        )
+
+    def evaluate(
+        self,
+        proposal: ActionProposal,
+    ) -> PolicyDecision:
+        if (
+            proposal.action_template
+            not in self.ALLOWED_ACTION_TEMPLATES
+        ):
+            return self._decision(
+                proposal=proposal,
+                outcome="blocked",
+                reason_codes=[
+                    "UNKNOWN_ACTION_TEMPLATE"
+                ],
+                policy_version="adapter-v1",
+            )
+
+        try:
+            engine_result = dict(
+                self.evaluator(
+                    proposal.model_dump(mode="json")
+                )
+            )
+        except Exception:
+            return self._decision(
+                proposal=proposal,
+                outcome="blocked",
+                reason_codes=[
+                    "POLICY_ENGINE_ERROR"
+                ],
+                policy_version="adapter-v1",
+            )
+
+        allowed = bool(
+            engine_result.get("allowed", False)
+        )
+
+        requires_human_review = bool(
+            engine_result.get(
+                "requires_human_review",
+                True,
+            )
+        )
+
+        reason_codes = self._normalize_reason_codes(
+            engine_result.get("reason_codes")
+        )
+
+        policy_version = str(
+            engine_result.get(
+                "policy_version",
+                "existing-policy",
+            )
+        )
+
+        if not allowed:
+            return self._decision(
+                proposal=proposal,
+                outcome="blocked",
+                reason_codes=reason_codes
+                or ["POLICY_DENIED"],
+                policy_version=policy_version,
+            )
+
+        if proposal.environment == "production":
+            return self._decision(
+                proposal=proposal,
+                outcome="human_review",
+                reason_codes=reason_codes
+                + ["PRODUCTION_REQUIRES_HUMAN"],
+                policy_version=policy_version,
+            )
+
+        if proposal.environment != "development":
+            return self._decision(
+                proposal=proposal,
+                outcome="human_review",
+                reason_codes=reason_codes
+                + ["NON_DEV_REQUIRES_HUMAN"],
+                policy_version=policy_version,
+            )
+
+        if proposal.risk_level != "low":
+            return self._decision(
+                proposal=proposal,
+                outcome="human_review",
+                reason_codes=reason_codes
+                + ["RISK_REQUIRES_HUMAN"],
+                policy_version=policy_version,
+            )
+
+        if requires_human_review:
+            return self._decision(
+                proposal=proposal,
+                outcome="human_review",
+                reason_codes=reason_codes
+                or ["POLICY_REQUIRES_HUMAN"],
+                policy_version=policy_version,
+            )
+
+        return self._decision(
+            proposal=proposal,
+            outcome="auto_approved",
+            reason_codes=reason_codes
+            or ["LOW_RISK_DEV_APPROVED"],
+            policy_version=policy_version,
+            simulation_allowed=self.execution_enabled,
         )

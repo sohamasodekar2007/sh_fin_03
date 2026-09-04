@@ -36,7 +36,6 @@ class GraphState(TypedDict, total=False):
     run_id: str
     tenant_id: str
     account_id: str
-    cloud_accounts: list  # list[CloudAccount] — see services/orchestrator/nodes.py::monitor()
     observation: dict
     # List fields use operator.add so partial updates are appended, not replaced.
     findings: Annotated[list, operator.add]
@@ -50,15 +49,12 @@ class GraphState(TypedDict, total=False):
     supervisor_decision: str
 
 
-def make_initial_state(run_id: str, tenant_id: str, account_id: str, cloud_accounts: list | None = None) -> dict:
-    """Convenience factory for a clean initial state dict. `cloud_accounts`
-    (list[CloudAccount]) is optional — nodes.py::monitor() falls back to one
-    demo account per provider when it's omitted."""
+def make_initial_state(run_id: str, tenant_id: str, account_id: str) -> dict:
+    """Convenience factory for a clean initial state dict."""
     return {
         "run_id": run_id,
         "tenant_id": tenant_id,
         "account_id": account_id,
-        "cloud_accounts": cloud_accounts or [],
         "observation": {},
         "findings": [],
         "proposals": [],

@@ -1,57 +1,44 @@
 """
-Node functions for the LangGraph pipeline (spec section 4).
+Node functions for the LangGraph pipeline (blueprint section 3.1).
 
-    Monitor    — services.adapters (multi-cloud) -> services.focus.normalizer
-                 -> UnifiedResource fleet. Degrades to each adapter's own
-                 synthetic fleet when no CloudAccount is onboarded/reachable.
-    Analyzer   — services.analyzer.service.analyze(): deterministic rules
-                 (services.analyzer.rules) + sklearn IsolationForest
-                 (services.analyzer.isolation_forest).
-    Decision   — services.decision.service.decide(): deterministic proposal
-                 templates, optionally reasoned over by an LLM via
-                 services.decision.llm (OpenAI Structured Outputs).
-    Supervisor — services.policy.policy_adapter.PolicyAdapter: the
-                 deterministic risk-scoring gatekeeper. The LLM never
-                 reaches this node's decision.
-    Executor   — services.executor.simulated_executor.SimulatedExecutor:
-                 idempotent, audited, template-mapped — never a free-form
-                 command, never a live call while EXECUTION_ENABLED=false.
-    Verifier   — services.verifier.health: ROI ledger entry per execution.
+Implementation status:
+    ✅ monitor   — calls collector.ec2 + collector.cloudwatch;
+                   degrades to mock_data.RESOURCES when collectors raise
+                   NotImplementedError (AWS not yet connected).
+    ✅ analyze   — runs all 5 rule functions from services.analyzer.rules
+                   over every resource in observation; collects real Findings.
+    🔲 decide    — stub; replace with LLM call (OpenRouter) in Days 5-7.
+    🔲 supervise — stub; replace with policy.engine.evaluate() in Days 5-7.
+    🔲 execute   — stub; replace with executor.actions in Days 8-10.
+    🔲 verify    — stub; replace with verifier.health in Days 8-10.
 
-Explainability (spec's Generative UI / Agent Activity feed): every node
-calls _trace_event() before returning; the WebSocket feed
-(apps/api/ws/agent_feed.py) and the REST /v1/agent-activity endpoint are
-both driven by these entries, not by separate hand-maintained state.
+Each node receives and returns a dict shaped like CloudCareState
+(app/models/schemas.py) so LangGraph can merge partial updates.
+
+Explainability (blueprint §6.3): every node MUST call _trace_event() before
+returning. The frontend Agent Activity feed is driven by these entries.
 """
 
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timezone
-from uuid import uuid4
-
-from apps.api.config import get_settings
-from packages.schemas.policy import ActionProposal
-from packages.schemas.unified_resource import UnifiedResource
-from services.executor.execution_audit import InMemoryExecutionAuditRepository
-from services.executor.simulated_executor import SimulatedExecutor
-from services.policy.policy_adapter import PolicyAdapter
 
 logger = logging.getLogger(__name__)
 
-# Module-level singletons: the audit repository is the idempotency ledger
-# and must survive across runs within this process. Swap
-# InMemoryExecutionAuditRepository for a Mongo-backed implementation of the
-# same ExecutionAuditRepository Protocol to persist it across restarts.
-_audit_repository = InMemoryExecutionAuditRepository()
-_executor = SimulatedExecutor(audit_repository=_audit_repository, execution_enabled=get_settings().execution_enabled)
-_policy_adapter = PolicyAdapter(execution_enabled=get_settings().execution_enabled)
-
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 def _trace_event(agent: str, summary: dict) -> dict:
-    """Partial state update with one new trace entry. graph.py declares
-    `trace` with an operator.add reducer, so LangGraph appends this to the
-    accumulated trace rather than replacing it."""
+    """
+    Return a partial state update with a single new trace entry.
+
+    Because graph.py declares `trace` with an operator.add reducer,
+    LangGraph *appends* the returned list to the accumulated trace rather
+    than replacing it — so nodes only return the new entry, not the full list.
+    """
     return {
         "trace": [
             {
@@ -64,61 +51,179 @@ def _trace_event(agent: str, summary: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Mock metric generator
+# ---------------------------------------------------------------------------
+
+def _mock_metrics_for(resource: dict) -> tuple[list[dict], list[dict]]:
+    """
+    Generate 14 days of synthetic CloudWatch-shaped metric samples for a
+    resource dict.  Used as the degraded path when the real collector is
+    not yet connected.
+
+    Returns:
+        cpu_samples:     list of {"Timestamp": str, "Average": float}
+        network_samples: list of {"Timestamp": str, "Sum": float}
+    """
+    random.seed(resource["id"])          # reproducible per instance
+    cpu_base = resource.get("cpu_p95", 20.0)
+    cpu_samples = [
+        {"Timestamp": f"day-{i}", "Average": max(0.0, cpu_base + random.gauss(0, 2))}
+        for i in range(14)
+    ]
+    # Low network for idle instances, moderate for others.
+    net_base = 2_000_000.0 if cpu_base < 10 else 50_000_000.0
+    network_samples = [
+        {"Timestamp": f"day-{i}", "Sum": max(0.0, net_base + random.gauss(0, net_base * 0.1))}
+        for i in range(14)
+    ]
+    return cpu_samples, network_samples
+
+
+# ---------------------------------------------------------------------------
 # Node 1 — monitor
 # ---------------------------------------------------------------------------
 
 def monitor(state: dict) -> dict:
-    """Collect this tenant's connected CloudAccounts across every provider
-    via services.adapters, normalizing everything to UnifiedResource. Falls
-    back to one demo CloudAccount per provider (aws/gcp/azure/onprem) when
-    the tenant hasn't onboarded a real account yet, so the pipeline always
-    has real, multi-cloud data to run against."""
-    from services.adapters.base import get_adapter
-    from services.focus.sample_data import daily_cost_series
+    """
+    Collect EC2 inventory + CloudWatch metrics.
 
+    Real path  : calls collector.ec2.list_instances() and
+                 collector.cloudwatch.get_cpu_utilization().
+    Degraded path: when either collector raises NotImplementedError (AWS
+                 not yet wired), falls back to mock_data.RESOURCES with a
+                 clear WARNING log so the pipeline never crashes.
+
+    Builds the `observation` dict that the rest of the graph depends on:
+        {
+            "resources": [
+                {
+                    "id": str,
+                    "cpu_p95": float,
+                    "monthly_cost_usd": float,
+                    "tags": dict,
+                    "environment": str,
+                    "cpu_samples": [{"Timestamp": str, "Average": float}, ...],
+                    "network_samples": [{"Timestamp": str, "Sum": float}, ...],
+                },
+                ...
+            ],
+            "resources_scanned": int,
+            "source": "aws" | "mock",
+        }
+    """
     run_id = state.get("run_id", "unknown")
-    tenant_id = state.get("tenant_id", "demo-tenant")
-    accounts: list = state.get("cloud_accounts", [])
+    region = state.get("account_id", "ap-south-1")   # account_id doubles as region hint
+    source = "aws"
+    raw_resources: list[dict] = []
 
-    if not accounts:
-        from packages.schemas.schemas import CloudAccount
+    # ------------------------------------------------------------------ #
+    # 1. Try real AWS collectors                                           #
+    # ------------------------------------------------------------------ #
+    try:
+        from packages.aws.aws_session import assumed_session
+        from services.collector.cloudwatch import get_cpu_utilization
+        from services.collector.ec2 import list_instances
 
-        accounts = [
-            CloudAccount(tenant_id=tenant_id, provider="aws", display_name="Demo AWS", account_id="123456789012", region="us-east-1"),
-            CloudAccount(tenant_id=tenant_id, provider="gcp", display_name="Demo GCP", account_id="cloudcare-demo-project", region="us-central1"),
-            CloudAccount(tenant_id=tenant_id, provider="azure", display_name="Demo Azure", account_id="cloudcare-demo-subscription", region="eastus"),
-            CloudAccount(tenant_id=tenant_id, provider="onprem", display_name="Demo Datacenter", account_id="dc-pune-01", region="dc-pune-01"),
-        ]
+        session = assumed_session(run_id)
+        instances = list_instances(session, region)
 
-    resources: list[UnifiedResource] = []
-    providers_used: dict[str, int] = {}
-    for account in accounts:
-        try:
-            adapter = get_adapter(account.provider)
-            import asyncio
+        for inst in instances:
+            instance_id = inst.get("InstanceId", "unknown")
+            tags_raw = inst.get("Tags", [])
+            tags = {t["Key"]: t["Value"] for t in tags_raw}
+            environment = tags.get("env", tags.get("Environment", "prod"))
 
-            collected = asyncio.run(adapter.collect(account))
-            resources.extend(collected)
-            providers_used[account.provider] = providers_used.get(account.provider, 0) + len(collected)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("monitor: adapter for provider=%s failed (%s) — skipping this account.", account.provider, exc)
+            # CloudWatch: 14-day CPU window
+            cpu_data = get_cpu_utilization(session, instance_id, region, days=14)
+            cpu_values = [p["Average"] for p in cpu_data if "Average" in p]
 
-    daily_costs = daily_cost_series(base=sum(r.effective_cost for r in resources) or 320.0)
+            # Network: not yet in the collector interface — will be added
+            # when collector.cloudwatch grows get_network_utilization().
+            network_data: list[dict] = []
+
+            raw_resources.append(
+                {
+                    "id": instance_id,
+                    "cpu_p95": _percentile(cpu_values, 95) if cpu_values else 0.0,
+                    "monthly_cost_usd": 0.0,   # enriched by cost_explorer later
+                    "tags": tags,
+                    "environment": environment,
+                    "cpu_samples": cpu_data,
+                    "network_samples": network_data,
+                }
+            )
+
+        logger.info("monitor: collected %d instances from AWS (run_id=%s)", len(raw_resources), run_id)
+
+    except NotImplementedError:
+        logger.warning(
+            "monitor: collector raised NotImplementedError — AWS not yet "
+            "connected. Degrading to mock_data.RESOURCES for run_id=%s.",
+            run_id,
+        )
+        source = "mock"
+        raw_resources = _build_mock_resources()
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "monitor: unexpected collector error (%s) — degrading to mock data for run_id=%s.",
+            exc,
+            run_id,
+        )
+        source = "mock"
+        raw_resources = _build_mock_resources()
 
     observation = {
-        "run_id": run_id,
-        "snapshot_id": str(uuid4()),
-        "resources": [r.model_dump(mode="json") for r in resources],
-        "resources_scanned": len(resources),
-        "providers": providers_used,
-        "daily_costs": daily_costs,
+        "resources": raw_resources,
+        "resources_scanned": len(raw_resources),
+        "source": source,
     }
 
     return {
         "observation": observation,
         "status": "analyzing",
-        **_trace_event("Monitor", {"resources_scanned": len(resources), "providers": providers_used}),
+        **_trace_event(
+            "Monitor",
+            {
+                "resources_scanned": len(raw_resources),
+                "source": source,
+            },
+        ),
     }
+
+
+def _build_mock_resources() -> list[dict]:
+    """Convert mock_data.RESOURCES into the observation resource shape."""
+    from apps.api.mock_data import RESOURCES
+
+    result = []
+    for r in RESOURCES:
+        cpu_samples, network_samples = _mock_metrics_for(r.model_dump())
+        result.append(
+            {
+                "id": r.id,
+                "cpu_p95": r.cpu_p95,
+                "monthly_cost_usd": r.monthly_cost_usd,
+                "tags": r.tags,
+                "environment": r.environment,
+                "cpu_samples": cpu_samples,
+                "network_samples": network_samples,
+            }
+        )
+    return result
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    """Local percentile helper (mirrors the one in rules.py, kept here to
+    avoid a circular import between nodes and the analyzer)."""
+    if not values:
+        return 0.0
+    values = sorted(values)
+    k = (len(values) - 1) * (pct / 100)
+    f, c = int(k), min(int(k) + 1, len(values) - 1)
+    if f == c:
+        return values[f]
+    return values[f] + (values[c] - values[f]) * (k - f)
 
 
 # ---------------------------------------------------------------------------
@@ -126,13 +231,97 @@ def monitor(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def analyze(state: dict) -> dict:
-    from services.analyzer.service import analyze as run_analyzer
+    """
+    Run all 5 rule functions from services.analyzer.rules over every
+    resource in observation["resources"], collecting real Finding objects.
+
+    Rules applied per resource:
+        1. classify_idle             — CPU/network p95 over 7-day window
+        2. classify_over_provisioned — CPU p95 over 14-day window
+        3. classify_unattached_ebs   — EBS volumes not attached (skipped if
+                                       resource has no ebs_volumes key)
+        4. classify_nonprod_schedule — off-hours CPU for non-prod envs
+        5. classify_spend_anomaly    — z-score vs 14-day trailing mean
+                                       (needs daily_costs in observation)
+
+    Each Finding is serialised to a plain dict before being stored in state
+    so LangGraph can merge it without Pydantic dependency issues.
+    """
+    from services.analyzer.rules import (
+        EBSVolume,
+        MetricSample,
+        classify_idle,
+        classify_nonprod_schedule,
+        classify_over_provisioned,
+        classify_spend_anomaly,
+        classify_unattached_ebs,
+    )
 
     observation = state.get("observation", {})
-    resources = [UnifiedResource.model_validate(r) for r in observation.get("resources", [])]
-    daily_costs = observation.get("daily_costs", [])
+    resources: list[dict] = observation.get("resources", [])
+    findings: list[dict] = []
 
-    findings = run_analyzer(resources, daily_costs)
+    for resource in resources:
+        resource_id = resource.get("id", "unknown")
+        tags = resource.get("tags", {})
+        environment = resource.get("environment", "prod")
+
+        # Build MetricSample list from raw cpu/network samples.
+        cpu_samples = resource.get("cpu_samples", [])
+        network_samples = resource.get("network_samples", [])
+
+        # Align cpu + network by index (both lists are same length from monitor).
+        metric_samples: list[MetricSample] = []
+        for i, cpu_pt in enumerate(cpu_samples):
+            cpu_val = cpu_pt.get("Average", 0.0)
+            net_val = network_samples[i]["Sum"] if i < len(network_samples) else 0.0
+            # Derive hour from Timestamp if available, default to midday.
+            ts = cpu_pt.get("Timestamp", "")
+            try:
+                hour = datetime.fromisoformat(ts).hour
+            except (ValueError, TypeError):
+                hour = 12
+            metric_samples.append(MetricSample(cpu=cpu_val, network_bytes=net_val, hour=hour))
+
+        # ---- Rule 1: idle ------------------------------------------------
+        finding = classify_idle(metric_samples, tags)
+        if finding:
+            findings.append({**finding.__dict__, "resource_id": resource_id})
+            logger.debug("analyze: %s flagged by %s", resource_id, finding.rule_id)
+
+        # ---- Rule 2: over-provisioned ------------------------------------
+        finding = classify_over_provisioned(metric_samples, tags)
+        if finding:
+            findings.append({**finding.__dict__, "resource_id": resource_id})
+            logger.debug("analyze: %s flagged by %s", resource_id, finding.rule_id)
+
+        # ---- Rule 3: unattached EBS --------------------------------------
+        for vol in resource.get("ebs_volumes", []):
+            ebs = EBSVolume(volume_id=vol.get("VolumeId", ""), state=vol.get("State", ""))
+            finding = classify_unattached_ebs(ebs, tags)
+            if finding:
+                findings.append({**finding.__dict__, "resource_id": resource_id})
+                logger.debug("analyze: EBS %s flagged by %s", vol.get("VolumeId"), finding.rule_id)
+
+        # ---- Rule 4: non-prod schedule -----------------------------------
+        finding = classify_nonprod_schedule(metric_samples, tags, environment)
+        if finding:
+            findings.append({**finding.__dict__, "resource_id": resource_id})
+            logger.debug("analyze: %s flagged by %s", resource_id, finding.rule_id)
+
+    # ---- Rule 5: spend anomaly (operates on the full cost series) --------
+    daily_costs: list[float] = observation.get("daily_costs", [])
+    finding = classify_spend_anomaly(daily_costs)
+    if finding:
+        findings.append({**finding.__dict__, "resource_id": "account-level"})
+        logger.debug("analyze: spend anomaly flagged — z_score=%s", finding.evidence.get("z_score"))
+
+    logger.info(
+        "analyze: %d finding(s) from %d resource(s) (source=%s)",
+        len(findings),
+        len(resources),
+        observation.get("source", "unknown"),
+    )
 
     return {
         "findings": findings,
@@ -142,111 +331,51 @@ def analyze(state: dict) -> dict:
             {
                 "resources_evaluated": len(resources),
                 "findings": len(findings),
-                "rule_ids": sorted({f["rule_id"] for f in findings}),
+                "rule_ids": list({f["rule_id"] for f in findings}),
             },
         ),
     }
 
 
 # ---------------------------------------------------------------------------
-# Node 3 — decide
+# Nodes 3-6 — stubs (unchanged, pending Days 5-10 tracks)
 # ---------------------------------------------------------------------------
 
 def decide(state: dict) -> dict:
-    from services.decision.service import decide as run_decision
+    """
+    Turn this run's Analyzer findings into schema-valid ActionProposals.
+
+    Deterministic (services.decision.service.build_proposals) — no LLM call
+    required to run or test this node. An LLM may later be added purely to
+    generate the human-readable `rationale` string; it must never decide
+    action_type, risk_level, or expected_monthly_savings.
+    """
+    from services.decision.service import build_proposals
 
     observation = state.get("observation", {})
     findings = state.get("findings", [])
-    tenant_id = state.get("tenant_id", "demo-tenant")
-
-    proposals = run_decision(observation, findings, tenant_id)
+    proposals = build_proposals(observation, findings)
     return {"proposals": proposals, **_trace_event("Decision", {"proposals": len(proposals)})}
 
-
-# ---------------------------------------------------------------------------
-# Node 4 — supervise
-# ---------------------------------------------------------------------------
-
 def supervise(state: dict) -> dict:
-    raw_proposals = state.get("proposals", [])
-    approvals: list[dict] = []
-    outcomes = {"auto_approved": 0, "human_review": 0, "blocked": 0}
-
-    for raw in raw_proposals:
-        try:
-            proposal = ActionProposal.model_validate(raw)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("supervise: invalid proposal skipped (%s)", exc)
-            continue
-        decision = _policy_adapter.evaluate(proposal)
-        outcomes[decision.outcome] = outcomes.get(decision.outcome, 0) + 1
-        approvals.append(decision.model_dump(mode="json"))
-
-    # At least one auto-approved (or human-review) decision advances the
-    # graph to `execute`; a run with only blocked decisions goes straight
-    # to `verify` with nothing to execute (see route_after_supervisor).
-    supervisor_decision = "execute" if any(a["outcome"] in ("auto_approved", "human_review") for a in approvals) else "human_review"
-
+    # TODO: call app.services.policy.engine.evaluate() using the real policy
+    # matrix (blueprint 6.1) — this stub always approves low-risk proposals.
+    approvals = [{"decision": "execute", "reason": "low risk, dev environment"}]
     return {
         "approvals": approvals,
-        "supervisor_decision": supervisor_decision,
-        **_trace_event("Supervisor", {"outcomes": outcomes}),
+        "supervisor_decision": "execute",
+        **_trace_event("Supervisor", {"decision": "execute"}),
     }
 
-
-# ---------------------------------------------------------------------------
-# Node 5 — execute
-# ---------------------------------------------------------------------------
 
 def execute(state: dict) -> dict:
-    raw_proposals = {p["proposal_id"]: p for p in state.get("proposals", [])}
-    raw_decisions = state.get("approvals", [])
+    # TODO: call app.services.executor.actions with an idempotency key —
+    # see blueprint 10.2 for the reference implementation.
+    execution_log = [{"template_id": "ec2.stop.v1", "result": "stopped", "rollback_template": "ec2.start.v1"}]
+    return {"execution_log": execution_log, "status": "executing", **_trace_event("Executor", {"executed": 1})}
 
-    execution_log: list[dict] = []
-    for raw_decision in raw_decisions:
-        proposal_raw = raw_proposals.get(raw_decision.get("proposal_id"))
-        if proposal_raw is None:
-            continue
-        try:
-            proposal = ActionProposal.model_validate(proposal_raw)
-            from packages.schemas.policy import PolicyDecision
-
-            decision = PolicyDecision.model_validate(raw_decision)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("execute: skipping invalid proposal/decision pair (%s)", exc)
-            continue
-
-        record = _executor.execute(proposal=proposal, decision=decision)
-        execution_log.append(record.model_dump(mode="json"))
-
-    return {
-        "execution_log": execution_log,
-        "status": "executing",
-        **_trace_event("Executor", {"executed": len(execution_log), "simulated": sum(r["status"] == "simulated" for r in execution_log)}),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Node 6 — verify
-# ---------------------------------------------------------------------------
 
 def verify(state: dict) -> dict:
-    from services.verifier.health import verify_action
-
-    proposals_by_id = {p["proposal_id"]: p for p in state.get("proposals", [])}
-    feedback = [
-        verify_action(record, proposals_by_id.get(record["proposal_id"], {}))
-        for record in state.get("execution_log", [])
-    ]
-
-    return {
-        "feedback": feedback,
-        "status": "verified",
-        **_trace_event(
-            "Verifier",
-            {
-                "verified": len(feedback),
-                "total_realized_monthly_savings_usd": round(sum(f["realized_monthly_savings_usd"] for f in feedback), 2),
-            },
-        ),
-    }
+    # TODO: call app.services.verifier.health / savings — see blueprint 10.3.
+    feedback = [{"status": "verified", "realized_savings": 14.20}]
+    return {"feedback": feedback, "status": "verified", **_trace_event("Verifier", {"status": "verified"})}

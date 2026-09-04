@@ -11,36 +11,33 @@ export default function AnalyzerAgentControl() {
   const [showJsonModal, setShowJsonModal] = useState(false);
 
   useEffect(() => {
-    getAuthHeaders().then((headers) =>
-      fetch(`${BASE_URL}/v1/findings/latest`, { headers })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data) setFindingsData(data);
-        })
-        .catch((err) => console.warn("Failed to fetch latest findings:", err))
-    );
+    fetch(`${BASE_URL}/v1/agent/analyze/latest`, {
+      credentials: "include",
+      headers: { ...getAuthHeaders() },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setFindingsData(data);
+      })
+      .catch((err) => console.warn("Failed to fetch latest findings:", err));
   }, []);
 
   const handleRunAnalysis = async () => {
     setAnalyzing(true);
     try {
-      // Analysis always runs as part of the same LangGraph pipeline as
-      // Monitor (see services/orchestrator/graph.py) — there's no
-      // standalone "analyze only" backend call, so this re-runs the full
-      // scan and then reads back just the Analyzer's slice of the result.
-      const res = await fetch(`${BASE_URL}/v1/runs`, {
+      const res = await fetch(`${BASE_URL}/v1/agent/analyze`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          ...(await getAuthHeaders()),
+          ...getAuthHeaders(),
         },
       });
+      const data = await res.json();
       if (!res.ok) {
-        const data = await res.json();
         throw new Error(data.detail || `Analysis request failed with status ${res.status}`);
       }
-      const findingsRes = await fetch(`${BASE_URL}/v1/findings/latest`, { headers: await getAuthHeaders() });
-      if (findingsRes.ok) setFindingsData(await findingsRes.json());
+      setFindingsData(data);
     } catch (err) {
       console.warn("Analyzer Agent error:", err);
     } finally {

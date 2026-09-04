@@ -72,7 +72,6 @@ def generate_mock_observation_bundle(account_id: str = "123456789012", region: s
             "state": "running",
             "launched_at": (now - timedelta(days=45)).isoformat(),
             "collected_at": now.isoformat(),
-            "monthly_cost_usd": round(spec["cost"] * 30, 2),
             "tags": {
                 "Name": name,
                 "Environment": spec["env"],
@@ -94,13 +93,8 @@ def generate_mock_observation_bundle(account_id: str = "123456789012", region: s
         else:
             cpu_series = [round(random.uniform(35.0, 68.0), 2) for _ in range(14)]
 
-        net_base = 2_000_000.0 if spec["pattern"] in ("idle", "nonprod_schedule") else 50_000_000.0
-        network_series = [round(max(0.0, net_base + random.gauss(0, net_base * 0.1)), 0) for _ in range(14)]
-
         cpu_p95 = sorted(cpu_series)[int(len(cpu_series) * 0.95)]
         avg_cpu = sum(cpu_series) / len(cpu_series)
-        resource_dict["cpu_samples"] = cpu_series
-        resource_dict["network_samples"] = network_series
 
         cpu_metrics.append(
             EC2CpuMetric(
@@ -141,7 +135,6 @@ def generate_mock_observation_bundle(account_id: str = "123456789012", region: s
             "state": "available",
             "launched_at": (now - timedelta(days=60)).isoformat(),
             "collected_at": now.isoformat(),
-            "monthly_cost_usd": vol["cost"],
             "tags": {
                 "Name": vol["name"],
                 "State": "available",

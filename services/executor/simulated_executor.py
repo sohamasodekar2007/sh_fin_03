@@ -3,7 +3,6 @@ from hashlib import sha256
 from services.executor.execution_audit import (
     ExecutionAuditRepository,
 )
-from services.executor.registry import ACTION_REGISTRY
 from packages.schemas.execution import ExecutionRecord
 from packages.schemas.policy import (
     ActionProposal,
@@ -12,7 +11,9 @@ from packages.schemas.policy import (
 
 
 class SimulatedExecutor:
-    SUPPORTED_TEMPLATES = set(ACTION_REGISTRY.keys())
+    SUPPORTED_TEMPLATES = {
+        "ec2.stop.v1",
+    }
 
     def __init__(
         self,
@@ -93,6 +94,22 @@ class SimulatedExecutor:
         if existing is not None:
             return existing
 
+        # VPS is read-only in this build — there is no billing API to
+        # verify a stop actually happened against, and stopping a VM on a
+        # company-owned box via SSH has a much worse failure mode than
+        # ec2:StopInstances (no API to reverse it, no console to recover
+        # from). Extension point for real VPS execution (virsh shutdown /
+        # docker stop), once that's built and reviewed:
+        #   services/executor/vps_actions.py (does not exist yet, on purpose)
+        if proposal.provider == "vps":
+            return self._record(
+                proposal=proposal,
+                decision=decision,
+                idempotency_key=idempotency_key,
+                status="blocked",
+                reason_codes=["vps_execution_not_enabled"],
+            )
+
         if decision.proposal_id != proposal.proposal_id:
             return self._record(
                 proposal=proposal,
@@ -165,16 +182,19 @@ class SimulatedExecutor:
                 ],
             )
 
-        template = ACTION_REGISTRY[proposal.action_template]
         would_execute = {
-            "provider": proposal.provider,
-            "service": "ec2" if proposal.provider == "aws" else proposal.provider,
-            "operation": template["aws_operation"],
-            "parameters": {**proposal.parameters, "resource_id": proposal.resource_id},
+            "provider": "aws",
+            "service": "ec2",
+            "operation": "StopInstances",
+            "parameters": {
+                "InstanceIds": [
+                    proposal.resource_id
+                ]
+            },
             "simulation": True,
             "message": (
-                f"CloudCare would request a {template['allowed_action']} "
-                f"operation ({template['aws_operation']}). No live API call was made."
+                "CloudCare would request an EC2 stop "
+                "operation. No AWS API call was made."
             ),
         }
 

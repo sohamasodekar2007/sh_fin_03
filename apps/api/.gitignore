@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+*.csv
+*.pem
+__pycache__/
+.pytest_cache/
+runtime/

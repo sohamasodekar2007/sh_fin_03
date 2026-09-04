@@ -1,33 +1,44 @@
-"""GET /v1/resources — the fleet, in the lightweight dashboard shape."""
-
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends
 
-from apps.api import mock_data
-from apps.api.dependencies import get_current_user
-from apps.api.pipeline import get_last_run
-from packages.schemas.schemas import UserInDB
-from packages.schemas.unified_resource import UnifiedResource
+from apps.api.db import get_db
+from apps.api.dependencies import CurrentUser
+from apps.api.mock_data import RESOURCES
+from packages.schemas.schemas import Resource
 
-router = APIRouter(prefix="/v1", tags=["resources"])
-
-
-@router.get("/resources")
-async def list_resources(user: UserInDB = Depends(get_current_user)):
-    run = get_last_run(user.tenant_id)
-    if not run:
-        return [r.model_dump() for r in mock_data.RESOURCES]
-
-    resources = [UnifiedResource.model_validate(r) for r in run.get("observation", {}).get("resources", [])]
-    return [r.to_dashboard_resource() for r in resources]
+router = APIRouter(prefix="/v1/resources", tags=["resources"])
 
 
-@router.get("/resources/unified")
-async def list_unified_resources(user: UserInDB = Depends(get_current_user)):
-    """FOCUS 1.0-shaped resources, straight off the last Monitor Agent run —
-    what the multi-cloud cost catalog / a real FOCUS export consumer would read."""
-    run = get_last_run(user.tenant_id)
-    if not run:
-        return []
-    return run.get("observation", {}).get("resources", [])
+async def _resources_collection():
+    """Returns the `resources` Mongo collection, auto-seeding it from
+    mock_data.py the first time it's empty so the demo/dashboard never
+    shows a blank screen while real AWS collection (Soham's track) is
+    still being wired in."""
+    db = get_db()
+    if await db.resources.count_documents({}) == 0:
+        await db.resources.insert_many([r.model_dump() for r in RESOURCES])
+    return db.resources
+
+
+@router.get("", response_model=list[Resource])
+async def list_resources(
+    current_user: CurrentUser,
+    environment: str | None = None,
+    status: str | None = None,
+) -> list[Resource]:
+    """List monitored resources, scoped to the caller's tenant (Days 5-7),
+    optionally filtered by environment or status.
+
+    Backed by MongoDB's `resources` collection. Once the collector service
+    (blueprint 9.2/9.3) is writing real AWS inventory + CloudWatch data in,
+    this query needs no further changes.
+    """
+    collection = await _resources_collection()
+
+    query: dict = {"tenant_id": current_user["tenant_id"]}
+    if environment:
+        query["environment"] = environment
+    if status:
+        query["status"] = status
+
+    docs = await collection.find(query, {"_id": 0}).to_list(length=None)
+    return [Resource(**doc) for doc in docs]

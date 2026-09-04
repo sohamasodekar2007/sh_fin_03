@@ -8,7 +8,7 @@ services:
     volumes:
       - mongo_data:/data/db
 
-  api:
+  backend:
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.api
@@ -18,24 +18,19 @@ services:
       - ./apps/api/.env.example
     environment:
       - MONGODB_URI=mongodb://mongo:27017
-      - CORS_ORIGINS=http://localhost:3000
     depends_on:
       - mongo
 
-  web:
+  frontend:
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.web
     ports:
       - "3000:3000"
-    env_file:
-      - ./apps/web/.env.local.example
     environment:
       - NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
-      - NEXT_PUBLIC_WS_BASE_URL=ws://localhost:8000
-      - NEXTAUTH_URL=http://localhost:3000
     depends_on:
-      - api
+      - backend
 
 volumes:
   mongo_data:

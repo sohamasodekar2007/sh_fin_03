@@ -2,20 +2,23 @@
 Core schemas, mirrored from the CloudCare blueprint (sections 3.2, 4.1, 6.2).
 These are the contracts the frontend, the LangGraph orchestrator, and
 MongoDB collections all agree on.
-
-The canonical ActionProposal / PolicyDecision live in
-packages/schemas/policy.py (they carry the Supervisor's PolicyAdapter and
-Executor's SimulatedExecutor along with them) — not duplicated here.
 """
 
-from datetime import datetime, timezone
-from typing import Literal
-from uuid import uuid4
-from pydantic import BaseModel, Field
+from datetime import datetime
+from decimal import Decimal
+from typing import Any, Literal
+from uuid import UUID, uuid4
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Shared / workflow state (blueprint 3.2)
 # ---------------------------------------------------------------------------
+
+class Evidence(BaseModel):
+    metric: str
+    value: float
+    window_days: int
+
 
 class CloudCareState(BaseModel):
     run_id: str
@@ -52,10 +55,68 @@ class Resource(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Proposals / recommendations (blueprint 6.2)
+# ---------------------------------------------------------------------------
+
+class ActionProposal(BaseModel):
+    proposal_id: UUID = Field(default_factory=uuid4)
+    resource_arn: str
+    action_type: Literal["stop_instance", "schedule_instance", "resize_instance"]
+    template_id: str
+    parameters: dict = Field(default_factory=dict)
+    expected_monthly_savings: Decimal
+    risk_level: Literal["low", "medium", "high", "critical"]
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[Evidence] = Field(default_factory=list)
+    rollback_plan: dict | None = None
+    requires_human_approval: bool = False
+    # "pending_approval"/"blocked" are the Supervisor's outcomes (Phase 4/5
+    # services/supervisor/service.py) — added here so GET /v1/recommendations
+    # (response_model=list[ActionProposal]) doesn't 500 once a proposal
+    # reaches either status.
+    status: Literal[
+        "proposed", "pending_approval", "approved", "rejected", "blocked", "executed", "verified"
+    ] = "proposed"
+
+    # Set when status transitions to "rejected" (see apps/api/routers/recommendations.py).
+    # The Monitor agent uses this to resurface stale rejections after an hour — see
+    # apps/api/routers/observation.py:_resurface_rejected_proposals().
+    rejected_at: datetime | None = None
+    # Set on a freshly-created proposal that resurfaces an older rejected one.
+    supersedes_proposal_id: str | None = None
+
+    # Which cloud this proposal's resource lives on. Drives the executor's
+    # VPS refusal (services/executor/simulated_executor.py) — VPS is
+    # read-only in this build.
+    provider: Literal["aws", "azure", "gcp", "vps"] = "aws"
+
+    # "billable" (default): a real invoice exists, so acting on this
+    # proposal produces a real dollar saving. "reclaimable_capacity": a
+    # fixed-price server (VPS) is owed its monthly cost regardless — see
+    # services/focus/mappers/vps.py's module docstring. When set, this
+    # proposal's expected_monthly_savings must be exactly 0 (enforced
+    # below) and the real value lives in reclaimable_vcpu/reclaimable_memory_mb.
+    savings_type: Literal["billable", "reclaimable_capacity"] = "billable"
+    reclaimable_vcpu: float | None = None
+    reclaimable_memory_mb: float | None = None
+
+    @model_validator(mode="after")
+    def _reclaimable_capacity_never_claims_dollar_savings(self) -> "ActionProposal":
+        if self.savings_type == "reclaimable_capacity" and self.expected_monthly_savings != Decimal("0"):
+            raise ValueError(
+                "A reclaimable_capacity proposal (VPS) must have expected_monthly_savings == 0 — "
+                "a fixed-price server's cost is owed regardless of what runs on it, so stopping "
+                "something never produces a real dollar saving. Use reclaimable_vcpu / "
+                "reclaimable_memory_mb to carry the real value instead."
+            )
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Agent activity feed
 # ---------------------------------------------------------------------------
 
-AgentName = Literal["Monitor", "Analyzer", "Decision", "Supervisor", "Executor", "Verifier"]
+AgentName = Literal["Monitor", "Analyzer", "Decision", "Supervisor", "Executor"]
 
 
 class AgentActivityEntry(BaseModel):
@@ -63,6 +124,13 @@ class AgentActivityEntry(BaseModel):
     agent: AgentName
     message: str
     timestamp: str
+    # Additive (Phase 10) — the underlying agent_runs document
+    # (services/agent_log.py) always has these; the API just didn't
+    # surface them until the dashboard's AgentActivityFeed needed to show
+    # per-run status/duration and an expandable payload.
+    status: Literal["success", "failed"] = "success"
+    duration_ms: int = 0
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -84,66 +152,125 @@ class SavingsSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Auth — SSO trust model (spec section 2)
+# Auth Models & 3FA
 # ---------------------------------------------------------------------------
-# FastAPI never mints or verifies passwords itself. NextAuth is the identity
-# authority: OAuth (Google/GitHub/Microsoft Entra ID) or its own
-# CredentialsProvider (bcrypt against the `users` Mongo collection) mints an
-# HS256 JWT signed with NEXTAUTH_SECRET. FastAPI only decodes + auto-provisions.
 
-AuthProvider = Literal["google", "github", "microsoft-entra-id", "credentials"]
+class LoginRequest(BaseModel):
+    user_id: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user_id: str
+    tenant_id: str
+
+
+class LoginStep1Response(BaseModel):
+    status: Literal["otp_required", "authenticated"]
+    user_id: str
+    temp_token: str | None = None
+    access_token: str | None = None
+    token_type: str = "bearer"
+    tenant_id: str | None = None
+
+
+class OtpVerifyRequest(BaseModel):
+    temp_token: str
+    otp: str
+
+
+class OtpVerifyResponse(BaseModel):
+    status: Literal["webauthn_required", "webauthn_registration_required"]
+    user_id: str
+    temp_token: str
+
+
+class OtpResendRequest(BaseModel):
+    temp_token: str
+
+
+class WebAuthnRegisterBeginRequest(BaseModel):
+    temp_token: str
+
+
+class WebAuthnRegisterFinishRequest(BaseModel):
+    temp_token: str
+    registration_response: dict
+
+
+class WebAuthnAuthenticateBeginRequest(BaseModel):
+    temp_token: str
+
+
+class WebAuthnAuthenticateFinishRequest(BaseModel):
+    temp_token: str
+    authentication_response: dict
+
+
+class RegisterRequest(BaseModel):
+    user_id: str
+    password: str
+    email: str
+    tenant_id: str = "demo-tenant"
+    full_name: str | None = None
 
 
 class UserPublic(BaseModel):
     """Safe-to-return shape — never includes hashed_password."""
-    id: str
+    user_id: str
     tenant_id: str
-    email: str
+    email: str | None = None
     full_name: str | None = None
-    image: str | None = None
-    provider: AuthProvider
+
+
+class SsoCallbackRequest(BaseModel):
+    """Phase 9 — posted by the frontend's NextAuth v5 server-side callback
+    after Google/GitHub completes the OAuth handshake. provider_account_id
+    is the OAuth provider's own stable user id (never the CloudCare
+    user_id), used to link repeat sign-ins deterministically."""
+    provider: Literal["google", "github"]
+    email: str
+    name: str | None = None
+    provider_account_id: str
 
 
 class UserInDB(BaseModel):
-    """Mirrors the `users` Mongo collection. Auto-provisioned by FastAPI
-    (see apps/api/dependencies.py::get_current_user) the first time a valid
-    NextAuth JWT arrives for an email not yet seen, or created directly by
-    NextAuth's CredentialsProvider on manual sign-up."""
-
-    id: str = Field(default_factory=lambda: str(uuid4()))
-    tenant_id: str = "demo-tenant"
-    email: str
+    """Mirrors the `users` Mongo collection."""
+    user_id: str
+    tenant_id: str
+    hashed_password: str
+    email: str | None = None
     full_name: str | None = None
-    image: str | None = None
-
-    provider: AuthProvider
-    provider_account_id: str | None = None  # google `sub`, github `id`, entra `oid`
-    hashed_password: str | None = None  # only set for provider == "credentials"
-
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 # ---------------------------------------------------------------------------
-# CloudAccount — multi-cloud onboarding (spec section 3)
+# CloudAccount (blueprint 4.1 — secure onboarding)
 # ---------------------------------------------------------------------------
 
 class CloudAccount(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     tenant_id: str
-    provider: Literal["aws", "gcp", "azure", "onprem"]
-    display_name: str
-    account_id: str  # AWS account id / GCP project id / Azure subscription id / hostname
+    provider: Literal["aws", "gcp", "azure"] = "aws"
+    account_id: str
+    status: Literal["pending", "validated", "failed"] = "pending"
 
-    # AWS
+    # True once this provider has a real, validated live connection.
+    # False means the Monitor agent serves FOCUS sample data for it instead
+    # of pretending to observe a real account — see
+    # services/focus/mappers/{gcp,azure,vps}.py.
+    connected: bool = False
+
+    # AWS specific
     role_arn: str | None = None
     external_id: str | None = None
+    region: str = "ap-south-1"
 
-    # GCP / Azure / on-prem — the raw secret (service-account JSON, client
-    # secret, SSH key) is never stored; only its AES-256-GCM ciphertext is
-    # (see services/adapters/crypto.py). `encrypted_credentials` holds
-    # base64(nonce || ciphertext || tag).
-    encrypted_credentials: str | None = None
+    # GCP specific
+    gcp_service_account_json: dict | None = None
 
-    region: str = "us-east-1"
-    status: Literal["pending", "validated", "failed"] = "pending"
-    last_synced_at: str | None = None
+    # Azure specific
+    azure_tenant_id: str | None = None
+    azure_client_id: str | None = None
+    azure_client_secret: str | None = None

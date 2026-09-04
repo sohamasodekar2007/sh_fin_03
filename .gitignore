@@ -1,28 +1,33 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-*.egg-info/
-pip_install*.log
+.env
+.env.*
+!.env.example
 
-# Node / Next.js
+# Local incident-response notes that catalog real (partial) secret values —
+# useful to read locally, must never enter git history.
+CLOUDCARE_BUILD_PLAN.md
+*.csv
+.focus-samples/
+__pycache__/
+*.py[codz]
+.pytest_cache/
+.venv/
+.venv*/
+venv/
+ENV/
 node_modules/
 .next/
+dist/
 out/
-apps/web/.next/
-apps/web/node_modules/
-
-# Env files — never commit real secrets, only .env.example / .env.local.example
-.env
-.env.local
-apps/api/.env
-apps/web/.env.local
-
-# FOCUS sample data (large, separately licensed — see scripts/seed_focus_sample.py)
-scripts/data/
-
-# Editor / OS
+*.tsbuildinfo
+.DS_Store
+*.pem
+*.log
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
+build/
+*.egg-info/
+.coverage
+htmlcov/
+.tox/
+.cache
+

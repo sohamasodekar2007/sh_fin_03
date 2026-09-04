@@ -19,31 +19,21 @@ class ValidationError(Exception):
 ACTION_REGISTRY = {
     "ec2.stop.v1": {
         "allowed_action": "stop_instance",
-        "aws_operation": "StopInstances",
-        "required_params": {"resource_id": str, "region": str},
+        "required_params": {"instance_id": str, "region": str},
         "rollback_template": "ec2.start.v1",
         "max_risk": "low",
     },
     "ec2.start.v1": {
         "allowed_action": "start_instance",
-        "aws_operation": "StartInstances",
-        "required_params": {"resource_id": str, "region": str},
+        "required_params": {"instance_id": str, "region": str},
         "rollback_template": None,
         "max_risk": "low",
     },
     "ec2.resize.v1": {
         "allowed_action": "resize_instance",
-        "aws_operation": "ModifyInstanceAttribute",
-        "required_params": {"resource_id": str, "region": str},
+        "required_params": {"instance_id": str, "region": str, "target_type": str},
         "rollback_template": "ec2.resize.v1",
         "max_risk": "medium",
-    },
-    "ec2.schedule.v1": {
-        "allowed_action": "schedule_instance",
-        "aws_operation": "CreateScheduledAction",
-        "required_params": {"resource_id": str, "region": str},
-        "rollback_template": None,
-        "max_risk": "low",
     },
 }
 
@@ -54,7 +44,6 @@ def validate_action(template_id: str, parameters: dict, policy_approved: bool) -
         raise SecurityError(f"Unknown action template: {template_id}")
     if not policy_approved:
         raise SecurityError("Policy denied this action")
-    missing = set(template["required_params"].keys()) - set(parameters.keys())
-    if missing:
-        raise ValidationError(f"Missing required action parameters: {sorted(missing)}")
+    if set(parameters.keys()) != set(template["required_params"].keys()):
+        raise ValidationError("Unexpected or missing action parameters")
     return template
