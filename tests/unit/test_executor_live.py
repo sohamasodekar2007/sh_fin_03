@@ -145,6 +145,35 @@ def test_refuses_when_execution_disabled():
 
     assert record.status == "refused"
     assert record.reason_codes == ["EXECUTION_DISABLED"]
+    audit_docs = db._get("execution_audit")._docs
+    assert len(audit_docs) == 1
+    assert audit_docs[0]["status"] == "refused"
+    assert audit_docs[0]["reason_codes"] == ["EXECUTION_DISABLED"]
+
+
+def test_records_user_rejection_without_aws_call():
+    db = _FakeDB()
+    proposal = _proposal(status="pending_approval")
+
+    with patch("services.executor.actions.get_settings", return_value=_settings(execution_mode="simulation")):
+        record = asyncio.run(
+            actions.record_rejected_action(
+                db,
+                proposal,
+                run_id=proposal["proposal_id"],
+                rejected_by="user-1",
+                reason="Not needed",
+            )
+        )
+
+    assert record.status == "rejected"
+    assert record.reason_codes == ["USER_REJECTED"]
+    assert record.actual_aws_call_made is False
+    assert record.after_state["rejected_by"] == "user-1"
+
+    audit_docs = db._get("execution_audit")._docs
+    assert len(audit_docs) == 1
+    assert audit_docs[0]["status"] == "rejected"
 
 
 # ---------------------------------------------------------------------------

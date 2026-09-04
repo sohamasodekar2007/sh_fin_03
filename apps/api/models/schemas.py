@@ -60,7 +60,7 @@ class Resource(BaseModel):
 class ActionProposal(BaseModel):
     proposal_id: UUID = Field(default_factory=uuid4)
     resource_arn: str
-    action_type: Literal["stop_instance", "schedule_instance", "resize_instance"]
+    action_type: Literal["stop_instance", "schedule_instance", "resize_instance", "delete_volume"]
     template_id: str
     parameters: dict = Field(default_factory=dict)
     expected_monthly_savings: Decimal

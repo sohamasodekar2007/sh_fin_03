@@ -68,6 +68,7 @@ from services.agent_log import log_agent_run
 from services.focus.metrics import ResourceMetric, get_resource_metric
 from services.notifications.email import send_approval_email_sync
 from services.orchestrator.legacy.supervisor_node import build_supervisor_node
+from services.governance.tags import exceeds_max_risk
 from services.policy import engine as policy_engine
 from services.policy.policy_adapter import PolicyAdapter
 from services.supervisor.approval_tokens import issue_approval_token
@@ -102,6 +103,9 @@ _ACTION_PLAIN_ENGLISH = {
     "stop_instance": "Stop this instance",
     "resize_instance": "Resize this instance to a smaller type",
     "schedule_instance": "Add an on/off schedule to this instance",
+    "delete_volume": "Delete this detached EBS volume after taking a snapshot",
+    "adjust_asg_capacity": "Reduce this Auto Scaling Group's desired capacity by one instance",
+    "no_action": "No action recommended — considered and declined, see rationale",
 }
 
 _EVIDENCE_UNITS_AND_COLUMNS: dict[str, tuple[str, str]] = {
@@ -249,8 +253,9 @@ def evaluate_policy_outcome(
         proposal_id=proposal["proposal_id"],
         tenant_id=tenant_id,
         snapshot_id=proposal.get("resource_arn", "unknown"),
-        resource_id=(proposal.get("parameters") or {}).get("instance_id", "unknown"),
-        resource_type="ec2_instance",
+        resource_id=(proposal.get("parameters") or {}).get("instance_id")
+        or (proposal.get("parameters") or {}).get("volume_id", "unknown"),
+        resource_type="ebs_volume" if proposal["action_type"] == "delete_volume" else "ec2_instance",
         action_template=proposal["template_id"],
         environment=environment_long if environment_long in ("development", "staging", "production") else "unknown",
         risk_level=proposal["risk_level"] if proposal["risk_level"] in ("low", "medium", "high") else "high",
@@ -362,18 +367,38 @@ async def run_supervisor_step(
         review_docs: list[dict[str, Any]] = []
 
         for p in proposals:
-            instance_id = (p.get("parameters") or {}).get("instance_id", "")
-            resource = resources_by_id.get(instance_id)
-            tags = tags_by_resource.get(instance_id, {})
+            params = p.get("parameters") or {}
+            target_resource_id = params.get("instance_id") or params.get("volume_id", "")
+            resource = resources_by_id.get(target_resource_id)
+            tags = tags_by_resource.get(target_resource_id, {})
             has_owner_tag = bool(tags.get("Owner") or tags.get("owner"))
             is_protected = str(tags.get("Protected", tags.get("protected", ""))).lower() == "true"
             environment_long = _environment_long_for(p, resource)
 
-            resource_metric = await get_resource_metric(db, tenant_id, instance_id) if instance_id else None
+            resource_metric = await get_resource_metric(db, tenant_id, target_resource_id) if target_resource_id else None
             score = score_proposal(p, resource, resource_metric, environment_long, now=started_at)
             policy_outcome, reason_codes = evaluate_policy_outcome(
                 p, tenant_id, environment_long, has_owner_tag, is_protected
             )
+
+            # Phase 15 — independent hard floors, re-checked here rather
+            # than trusted from whatever Decision/policy_engine already
+            # concluded (same "don't trust upstream" principle Phase 14
+            # applied to RDS/S3). Neither of these actually changes
+            # new_status below (every non-blocked outcome already lands on
+            # pending_approval, never auto-executes — see this module's
+            # docstring); they correct policy_outcome itself so the
+            # dashboard/audit trail never displays "auto_approved" for a
+            # resource with no ownership tag or a real risk_level above its
+            # customer-set cloudcare:max-risk ceiling.
+            missing_ownership = bool((resource or {}).get("dependency_context", {}).get("missing_ownership"))
+            risk_ceiling_exceeded = exceeds_max_risk(p["risk_level"], tags)
+            if policy_outcome == "auto_approved" and (missing_ownership or risk_ceiling_exceeded):
+                policy_outcome = "needs_approval"
+                if missing_ownership:
+                    reason_codes = [*reason_codes, "MISSING_OWNERSHIP_TAG"]
+                if risk_ceiling_exceeded:
+                    reason_codes = [*reason_codes, "EXCEEDS_MAX_RISK_CEILING"]
 
             # Never auto-execute from here, whatever policy_outcome says —
             # only a human clicking Approve moves a proposal past this.

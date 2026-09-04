@@ -36,8 +36,10 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import boto3
+from botocore.exceptions import ClientError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from apps.api.config import get_settings
@@ -47,7 +49,10 @@ from services.policy import engine as policy_engine
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_ACTIONS = {"stop_instance", "start_instance", "resize_instance", "delete_volume", "schedule_instance"}
+ALLOWED_ACTIONS = {
+    "stop_instance", "start_instance", "resize_instance", "delete_volume", "schedule_instance",
+    "adjust_asg_capacity",  # Phase 15 — no_action is deliberately NOT here, see handlers dict below
+}
 
 _ENV_LONG_TO_SHORT = {"development": "dev", "staging": "staging", "production": "prod"}
 
@@ -88,7 +93,13 @@ def assumed_write_session(run_id: str) -> boto3.Session:
             "set it explicitly; never reuse AWS_READ_ROLE_ARN or root keys.",
         )
 
-    sts = boto3.client("sts")
+    source_session = boto3.Session(
+        aws_access_key_id=getattr(settings, "aws_access_key_id", None) or None,
+        aws_secret_access_key=getattr(settings, "aws_secret_access_key", None) or None,
+        profile_name=getattr(settings, "aws_profile", None) or None,
+        region_name=settings.aws_region,
+    )
+    sts = source_session.client("sts")
     assume_kwargs: dict[str, Any] = {
         "RoleArn": settings.aws_write_role_arn,
         "RoleSessionName": f"cloudcare-executor-{run_id[:20]}",
@@ -97,7 +108,23 @@ def assumed_write_session(run_id: str) -> boto3.Session:
     if settings.aws_external_id:
         assume_kwargs["ExternalId"] = settings.aws_external_id
 
-    response = sts.assume_role(**assume_kwargs)
+    try:
+        response = sts.assume_role(**assume_kwargs)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+        has_direct_credentials = bool(
+            getattr(settings, "aws_access_key_id", None)
+            and getattr(settings, "aws_secret_access_key", None)
+        )
+        if error_code == "AccessDenied" and has_direct_credentials:
+            logger.warning(
+                "executor: could not assume %s; falling back to configured AWS credentials for run %s",
+                settings.aws_write_role_arn,
+                run_id,
+            )
+            return source_session
+        raise
+
     creds = response["Credentials"]
     return boto3.Session(
         aws_access_key_id=creds["AccessKeyId"],
@@ -211,6 +238,21 @@ def _describe_volume(ec2: Any, volume_id: str) -> tuple[dict[str, str], dict[str
     return tags, volume
 
 
+def _describe_asg(autoscaling: Any, asg_name: str) -> tuple[dict[str, str], dict[str, Any]]:
+    try:
+        resp = autoscaling.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
+    except Exception as exc:
+        raise ExecutionRefused(
+            "RESOURCE_NOT_FOUND", f"Could not describe Auto Scaling Group {asg_name}: {exc}"
+        ) from exc
+    groups = resp.get("AutoScalingGroups", [])
+    if not groups:
+        raise ExecutionRefused("RESOURCE_NOT_FOUND", f"Auto Scaling Group {asg_name} not found.")
+    group = groups[0]
+    tags = {t["Key"]: t["Value"] for t in group.get("Tags", [])}
+    return tags, group
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
@@ -224,8 +266,13 @@ async def execute_action(
     (apps/api/routers/supervisor.py) now calls in place of the old
     simulation-only SimulatedExecutor once a proposal is genuinely
     "approved"."""
+    started_at = datetime.now(timezone.utc)
     action_type = proposal_doc.get("action_type")
     run_id = run_id or proposal_doc.get("proposal_id", "unknown")
+
+    async def _finish(record: LiveExecutionRecord) -> LiveExecutionRecord:
+        await _log_executor_record(db, proposal_doc, record, run_id, started_at)
+        return record
 
     handlers = {
         "stop_instance": _stop_instance,
@@ -233,31 +280,90 @@ async def execute_action(
         "resize_instance": _resize_instance,
         "delete_volume": _delete_volume,
         "schedule_instance": _schedule_instance,
+        "adjust_asg_capacity": _adjust_asg_capacity,
+        # Phase 15 — no_action deliberately has no handler: if one is ever
+        # mistakenly "approved" and reaches here, the handlers.get() miss
+        # below returns the existing UNSUPPORTED_ACTION refusal, the same
+        # structural-never-executable property Phase 14 gave RDS/S3.
     }
     handler = handlers.get(action_type)
     if handler is None:
-        return _refused_record(proposal_doc, run_id, "main", "UNSUPPORTED_ACTION", f"Unsupported action_type: {action_type!r}")
+        return await _finish(
+            await _save_refused_record(
+                db, proposal_doc, run_id, "main", "UNSUPPORTED_ACTION", f"Unsupported action_type: {action_type!r}"
+            )
+        )
 
     settings = get_settings()
     try:
         _authorize_pre_aws(proposal_doc, settings)
     except ExecutionRefused as exc:
-        return _refused_record(proposal_doc, run_id, "main", exc.reason_code, exc.message)
+        return await _finish(await _save_refused_record(db, proposal_doc, run_id, "main", exc.reason_code, exc.message))
 
     resource_arn = proposal_doc.get("resource_arn", "")
     acquired = await _acquire_lock(db, resource_arn)
     if not acquired:
-        return _refused_record(
-            proposal_doc, run_id, "main", "LOCKED",
-            f"Another execution is already in progress for {resource_arn}.",
+        return await _finish(
+            await _save_refused_record(
+                db,
+                proposal_doc,
+                run_id,
+                "main",
+                "LOCKED",
+                f"Another execution is already in progress for {resource_arn}.",
+            )
         )
 
     try:
-        return await handler(db, proposal_doc, run_id, settings)
+        return await _finish(await handler(db, proposal_doc, run_id, settings))
     except ExecutionRefused as exc:
-        return _refused_record(proposal_doc, run_id, "main", exc.reason_code, exc.message)
+        return await _finish(await _save_refused_record(db, proposal_doc, run_id, "main", exc.reason_code, exc.message))
     finally:
         await _release_lock(db, resource_arn)
+
+
+async def _log_executor_record(
+    db: AsyncIOMotorDatabase,
+    proposal_doc: dict[str, Any],
+    record: LiveExecutionRecord,
+    run_id: str,
+    started_at: datetime,
+) -> None:
+    finished_at = datetime.now(timezone.utc)
+    ok = record.status in {"executed", "no_op"}
+    message = (
+        f"Executor {record.status}: {record.action_type} on {record.resource_id}"
+        + (f" ({', '.join(record.reason_codes)})" if record.reason_codes else "")
+    )
+    try:
+        await db.agent_runs.insert_one(
+            {
+                "log_id": str(uuid4()),
+                "tenant_id": record.tenant_id,
+                "run_id": run_id,
+                "agent": "Executor",
+                "status": "success" if ok else "failed",
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_ms": int((finished_at - started_at).total_seconds() * 1000),
+                "input_summary": {
+                    "proposal_id": record.proposal_id,
+                    "resource_arn": record.resource_arn,
+                    "action_type": proposal_doc.get("action_type"),
+                },
+                "output_summary": {
+                    "message": message,
+                    "execution_status": record.status,
+                    "reason_codes": record.reason_codes,
+                    "actual_aws_call_made": record.actual_aws_call_made,
+                    "execution_mode": record.execution_mode,
+                },
+                "payload": record.model_dump(mode="json"),
+                "error": None if ok else "; ".join(record.reason_codes),
+            }
+        )
+    except Exception:
+        logger.exception("executor: failed to write agent_runs log for %s", record.proposal_id)
 
 
 def _refused_record(proposal_doc: dict[str, Any], run_id: str, step: str, reason_code: str, message: str) -> LiveExecutionRecord:
@@ -277,6 +383,62 @@ def _refused_record(proposal_doc: dict[str, Any], run_id: str, step: str, reason
         execution_mode=getattr(get_settings(), "execution_mode", "simulation"),
         actual_aws_call_made=False,
     )
+
+
+async def _save_refused_record(
+    db: AsyncIOMotorDatabase,
+    proposal_doc: dict[str, Any],
+    run_id: str,
+    step: str,
+    reason_code: str,
+    message: str,
+) -> LiveExecutionRecord:
+    record = _refused_record(proposal_doc, run_id, step, reason_code, message)
+    try:
+        return await MongoLiveExecutionAuditRepository(db).save(record)
+    except Exception:
+        logger.exception("executor: failed to persist refusal audit for %s", proposal_doc.get("proposal_id"))
+        return record
+
+
+async def record_rejected_action(
+    db: AsyncIOMotorDatabase,
+    proposal_doc: dict[str, Any],
+    *,
+    run_id: str | None = None,
+    rejected_by: str | None = None,
+    reason: str | None = None,
+) -> LiveExecutionRecord:
+    """Persist the Executor-side outcome for a human rejection.
+
+    Rejection is a terminal no-mutation decision, but it still belongs in
+    `execution_audit` so the five-agent workflow has a complete trail:
+    Monitor -> Analyzer -> Decision -> Supervisor -> Executor(no action).
+    """
+    proposal_id = proposal_doc.get("proposal_id", "unknown")
+    params = proposal_doc.get("parameters") or {}
+    resource_id = params.get("instance_id") or params.get("volume_id") or ""
+    record = LiveExecutionRecord(
+        idempotency_key=f"{proposal_id}:user_rejected",
+        proposal_id=proposal_id,
+        tenant_id=proposal_doc.get("tenant_id", "unknown"),
+        run_id=run_id or proposal_id,
+        resource_arn=proposal_doc.get("resource_arn", ""),
+        resource_id=resource_id,
+        action_type=proposal_doc.get("action_type", "unknown"),
+        status="rejected",
+        reason_codes=["USER_REJECTED"],
+        execution_mode=getattr(get_settings(), "execution_mode", "simulation"),
+        actual_aws_call_made=False,
+        before_state={"approved": False},
+        after_state={
+            "approved": False,
+            "rejected_by": rejected_by,
+            "rejection_reason": reason or "",
+        },
+        rollback_descriptor=None,
+    )
+    return await MongoLiveExecutionAuditRepository(db).save(record)
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +507,83 @@ async def _toggle_instance_power(
         idempotency_key=idempotency_key, proposal_id=proposal_id, tenant_id=proposal_doc.get("tenant_id", "unknown"),
         run_id=run_id, resource_arn=resource_arn, resource_id=instance_id, action_type=action, status="executed",
         reason_codes=[f"{action.upper()}_REQUESTED"], execution_mode=settings.execution_mode,
+        actual_aws_call_made=actual_call_made, before_state=before_state, after_state=after_state,
+        rollback_descriptor=rollback_descriptor,
+    )
+    return await repo.save(record)
+
+
+# ---------------------------------------------------------------------------
+# adjust_asg_capacity (Phase 15) — same three-gate / idempotency / lock
+# pattern as _toggle_instance_power, targeting the autoscaling: API instead
+# of ec2:. Never auto-executable regardless of environment/risk — Decision
+# (services/decision/service.py::build_proposals) always sets
+# requires_human_approval=True on this action_type, and this handler itself
+# adds nothing beyond that; a human must still click Approve like any other
+# production-adjacent action.
+# ---------------------------------------------------------------------------
+
+
+async def _adjust_asg_capacity(
+    db: AsyncIOMotorDatabase, proposal_doc: dict[str, Any], run_id: str, settings: Any
+) -> LiveExecutionRecord:
+    proposal_id = proposal_doc["proposal_id"]
+    tenant_id = proposal_doc.get("tenant_id", "unknown")
+    params = proposal_doc.get("parameters") or {}
+    asg_name = params.get("asg_name", "")
+    region = params.get("region", settings.aws_region)
+    resource_arn = proposal_doc.get("resource_arn", "")
+    proposed_capacity = params.get("proposed_desired_capacity")
+
+    if not asg_name or proposed_capacity is None:
+        raise ExecutionRefused(
+            "MISSING_ASG_PARAMETERS",
+            "adjust_asg_capacity requires parameters.asg_name and parameters.proposed_desired_capacity.",
+        )
+
+    session = assumed_write_session(run_id)
+    autoscaling = session.client("autoscaling", region_name=region)
+
+    tags, group = _describe_asg(autoscaling, asg_name)
+    _authorize_post_describe(proposal_doc, tags, settings)
+
+    repo = MongoLiveExecutionAuditRepository(db)
+    idempotency_key = f"{proposal_id}:adjust_asg_capacity"
+    existing = await repo.get_by_idempotency_key(idempotency_key)
+    if existing is not None:
+        return existing
+
+    current_capacity = group.get("DesiredCapacity")
+    before_state = {"desired_capacity": current_capacity, "asg_name": asg_name, "region": region}
+    rollback_descriptor = {
+        "action": "adjust_asg_capacity",
+        "asg_name": asg_name,
+        "region": region,
+        "restore_desired_capacity": current_capacity,
+    }
+
+    if current_capacity == proposed_capacity:
+        record = LiveExecutionRecord(
+            idempotency_key=idempotency_key, proposal_id=proposal_id, tenant_id=tenant_id, run_id=run_id,
+            resource_arn=resource_arn, resource_id=asg_name, action_type="adjust_asg_capacity", status="no_op",
+            reason_codes=["ALREADY_AT_DESIRED_CAPACITY"], execution_mode=settings.execution_mode,
+            actual_aws_call_made=False, before_state=before_state, after_state=before_state,
+            rollback_descriptor=rollback_descriptor,
+        )
+        return await repo.save(record)
+
+    actual_call_made = False
+    if settings.execution_mode == "live":
+        autoscaling.update_auto_scaling_group(AutoScalingGroupName=asg_name, DesiredCapacity=proposed_capacity)
+        actual_call_made = True
+        after_state = {"desired_capacity": proposed_capacity, "asg_name": asg_name, "region": region}
+    else:
+        after_state = {"desired_capacity": f"{proposed_capacity} (simulated)", "asg_name": asg_name, "region": region}
+
+    record = LiveExecutionRecord(
+        idempotency_key=idempotency_key, proposal_id=proposal_id, tenant_id=tenant_id, run_id=run_id,
+        resource_arn=resource_arn, resource_id=asg_name, action_type="adjust_asg_capacity", status="executed",
+        reason_codes=["ASG_CAPACITY_ADJUSTED"], execution_mode=settings.execution_mode,
         actual_aws_call_made=actual_call_made, before_state=before_state, after_state=after_state,
         rollback_descriptor=rollback_descriptor,
     )

@@ -21,6 +21,8 @@ from webauthn import (
     options_to_json,
 )
 from webauthn.helpers import bytes_to_base64url, base64url_to_bytes
+from webauthn.helpers.parse_authentication_credential_json import parse_authentication_credential_json
+from webauthn.helpers.parse_registration_credential_json import parse_registration_credential_json
 from webauthn.helpers.structs import (
     AttestationConveyancePreference,
     AuthenticatorSelectionCriteria,
@@ -32,6 +34,7 @@ from apps.api.config import get_settings
 from apps.api.db import get_db
 from packages.schemas.schemas import (
     LoginRequest,
+    LoginBypassRequest,
     LoginResponse,
     LoginStep1Response,
     OtpVerifyRequest,
@@ -42,6 +45,8 @@ from packages.schemas.schemas import (
     WebAuthnRegisterFinishRequest,
     WebAuthnAuthenticateBeginRequest,
     WebAuthnAuthenticateFinishRequest,
+    WebAuthnSessionRegisterFinishRequest,
+    SsoMfaPreferenceRequest,
     RegisterRequest,
     UserPublic,
 )
@@ -49,6 +54,17 @@ from packages.schemas.schemas import (
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="v1/auth/login", auto_error=False)
+
+
+async def ensure_auth_indexes(db) -> None:
+    await db.users.create_index("user_id", unique=True, name="user_id_unique")
+    await db.users.create_index("email", name="email")
+    await db.sessions.create_index("session_id", unique=True, name="session_id_unique")
+    await db.sessions.create_index("user_id", unique=True, name="user_id_unique")
+    await db.sessions.create_index("otp_expires_at", expireAfterSeconds=600, name="auth_session_ttl")
+    await db.webauthn_credentials.create_index("credential_id", unique=True, name="credential_id_unique")
+    await db.webauthn_credentials.create_index("user_id", name="user_id")
+    await db.audit_logs.create_index([("user_id", 1), ("timestamp", -1)], name="user_auth_events")
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +82,10 @@ async def ensure_demo_user(db):
             "email": "teamalpha817@gmail.com",
             "tenant_id": "demo-tenant",
             "failed_login_attempts": 0,
-            "otp_bypass_enabled": True,
+            "otp_bypass_enabled": False,
         })
     else:
-        updates = {"otp_bypass_enabled": True}
+        updates = {"otp_bypass_enabled": False}
         if user.get("email") != "teamalpha817@gmail.com":
             updates["email"] = "teamalpha817@gmail.com"
         await db.users.update_one({"user_id": "demo.user"}, {"$set": updates})
@@ -94,6 +110,61 @@ def _set_access_token_cookie(response: Response, access_token: str, settings) ->
         samesite="none" if settings.app_env != "development" else "lax",
         max_age=settings.jwt_expire_minutes * 60,
     )
+
+
+def _webauthn_expected_origins(settings) -> list[str]:
+    origins = [settings.webauthn_origin, *settings.cors_origin_list]
+    return list(dict.fromkeys(origin for origin in origins if origin))
+
+
+async def _verify_password_login(db, user_id: str, password: str, now: datetime.datetime):
+    await ensure_demo_user(db)
+
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user ID or password",
+        )
+
+    locked_until = user.get("locked_until")
+    if locked_until:
+        if isinstance(locked_until, str):
+            locked_until = datetime.datetime.fromisoformat(locked_until)
+        if locked_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Account temporarily locked due to too many failed attempts. Try again later.",
+            )
+
+    if not user.get("hashed_password") or not pwd_context.verify(password, user["hashed_password"]):
+        attempts = user.get("failed_login_attempts", 0) + 1
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"failed_login_attempts": attempts}}
+        )
+        await log_auth_event(db, user_id, "login.password_failure", {"attempts": attempts})
+
+        if attempts >= 5:
+            locked_until_time = now + datetime.timedelta(minutes=15)
+            await db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"locked_until": locked_until_time}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed attempts. Account locked for 15 minutes.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user ID or password",
+        )
+
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"failed_login_attempts": 0}, "$unset": {"locked_until": ""}}
+    )
+    return user
 
 
 async def log_auth_event(db, user_id: str, event_type: str, details: dict):
@@ -162,59 +233,10 @@ async def login(
     db = get_db()
     settings = get_settings()
     now = datetime.datetime.now(datetime.timezone.utc)
-    
-    await ensure_demo_user(db)
-    
-    user = await db.users.find_one({"user_id": payload.user_id})
-    if not user:
-        # Uniform error message to prevent user enumeration
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid user ID or password",
-        )
-        
-    # Check brute-force lockout
-    locked_until = user.get("locked_until")
-    if locked_until:
-        if isinstance(locked_until, str):
-            locked_until = datetime.datetime.fromisoformat(locked_until)
-        if locked_until > now:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Account temporarily locked due to too many failed attempts. Try again later.",
-            )
-            
-    # Verify password
-    if not pwd_context.verify(payload.password, user["hashed_password"]):
-        attempts = user.get("failed_login_attempts", 0) + 1
-        await db.users.update_one(
-            {"user_id": payload.user_id},
-            {"$set": {"failed_login_attempts": attempts}}
-        )
-        await log_auth_event(db, payload.user_id, "login.password_failure", {"attempts": attempts})
-        
-        if attempts >= 5:
-            locked_until_time = now + datetime.timedelta(minutes=15)
-            await db.users.update_one(
-                {"user_id": payload.user_id},
-                {"$set": {"locked_until": locked_until_time}}
-            )
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many failed attempts. Account locked for 15 minutes.",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid user ID or password",
-        )
-        
-    # Reset attempts on success
-    await db.users.update_one(
-        {"user_id": payload.user_id},
-        {"$set": {"failed_login_attempts": 0}, "$unset": {"locked_until": ""}}
-    )
 
-    if payload.user_id == "demo.user" and user.get("otp_bypass_enabled", True):
+    user = await _verify_password_login(db, payload.user_id, payload.password, now)
+
+    if settings.app_env == "development" and payload.user_id == "demo.user" and user.get("otp_bypass_enabled", False):
         tenant_id = user.get("tenant_id", "demo-tenant")
         access_token = _build_access_token(payload.user_id, tenant_id, settings, now)
         _set_access_token_cookie(response, access_token, settings)
@@ -283,6 +305,35 @@ async def login(
     )
 
 
+@router.post("/login/bypass", response_model=LoginResponse)
+async def login_bypass(payload: LoginBypassRequest, response: Response) -> LoginResponse:
+    """Development/demo login that verifies password but skips OTP and WebAuthn."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    if settings.app_env != "development":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Login bypass is only available in development.",
+        )
+
+    user = await _verify_password_login(db, payload.user_id, payload.password, now)
+    bypass_allowed = payload.user_id == "demo.user" or user.get("otp_bypass_enabled", False)
+    if not bypass_allowed:
+        await log_auth_event(db, payload.user_id, "login.bypass_denied", {"reason": "disabled_for_user"})
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Login bypass is not enabled for this user.",
+        )
+
+    tenant_id = user.get("tenant_id", "demo-tenant")
+    access_token = _build_access_token(payload.user_id, tenant_id, settings, now)
+    _set_access_token_cookie(response, access_token, settings)
+    await log_auth_event(db, payload.user_id, "login.bypass_success", {})
+    return LoginResponse(access_token=access_token, user_id=payload.user_id, tenant_id=tenant_id)
+
+
 @router.post("/otp/verify", response_model=OtpVerifyResponse)
 async def verify_otp(payload: OtpVerifyRequest) -> OtpVerifyResponse:
     """Step 2: Verify OTP. Returns whether WebAuthn registration or authentication is required."""
@@ -346,7 +397,7 @@ async def verify_otp(payload: OtpVerifyRequest) -> OtpVerifyResponse:
         )
         await log_auth_event(db, user_id, "otp.lockout", {"attempts": attempts})
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUEST,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed verification attempts. Account locked for 15 minutes.",
         )
         
@@ -493,7 +544,7 @@ async def register_begin(payload: WebAuthnRegisterBeginRequest):
         user_display_name=user_id,
         attestation=AttestationConveyancePreference.NONE,
         authenticator_selection=AuthenticatorSelectionCriteria(
-            user_verification=UserVerificationRequirement.PREFERRED
+            user_verification=UserVerificationRequirement.REQUIRED
         ),
     )
     
@@ -546,15 +597,21 @@ async def register_finish(payload: WebAuthnRegisterFinishRequest, response: Resp
         verification = verify_registration_response(
             credential=credential,
             expected_challenge=expected_challenge,
-            expected_origin=settings.webauthn_origin,
+            expected_origin=_webauthn_expected_origins(settings),
             expected_rp_id=settings.webauthn_rp_id,
-            require_user_verification=False,
+            require_user_verification=True,
         )
     except Exception as e:
-        await log_auth_event(db, user_id, "webauthn.register_finish_failure", {"error": str(e)})
+        expected_origins = _webauthn_expected_origins(settings)
+        await log_auth_event(
+            db,
+            user_id,
+            "webauthn.register_finish_failure",
+            {"error": str(e), "expected_origins": expected_origins},
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"WebAuthn registration verification failed: {e}",
+            detail=f"WebAuthn registration verification failed: {e}. Expected origins: {expected_origins}",
         )
         
     cred_id_str = bytes_to_base64url(verification.credential_id)
@@ -645,7 +702,7 @@ async def authenticate_begin(payload: WebAuthnAuthenticateBeginRequest):
     options = generate_authentication_options(
         rp_id=settings.webauthn_rp_id,
         allow_credentials=allow_credentials,
-        user_verification=UserVerificationRequirement.PREFERRED
+        user_verification=UserVerificationRequirement.REQUIRED
     )
     
     challenge_str = bytes_to_base64url(options.challenge)
@@ -710,10 +767,10 @@ async def authenticate_finish(payload: WebAuthnAuthenticateFinishRequest, respon
             credential=credential,
             expected_challenge=expected_challenge,
             expected_rp_id=settings.webauthn_rp_id,
-            expected_origin=settings.webauthn_origin,
+            expected_origin=_webauthn_expected_origins(settings),
             credential_public_key=public_key,
             credential_current_sign_counter=current_sign_counter,
-            require_user_verification=False,
+            require_user_verification=True,
         )
     except Exception as e:
         await log_auth_event(db, user_id, "webauthn.auth_finish_failure", {"error": str(e)})
@@ -769,6 +826,12 @@ async def webauthn_bypass(payload: WebAuthnRegisterBeginRequest, response: Respo
     db = get_db()
     settings = get_settings()
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    if settings.app_env != "development":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="WebAuthn bypass is only available in development.",
+        )
     
     try:
         token_data = jwt.decode(payload.temp_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
@@ -950,6 +1013,132 @@ async def get_me(current_user: CurrentUser) -> UserPublic:
     )
 
 
+@router.post("/sso/mfa-preference")
+async def set_sso_mfa_preference(
+    payload: SsoMfaPreferenceRequest,
+    current_user: CurrentUser,
+):
+    db = get_db()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    await db.users.update_one(
+        {"user_id": current_user["user_id"]},
+        {"$set": {"sso_mfa_level": payload.mfa_level, "sso_mfa_updated_at": now}},
+    )
+    await log_auth_event(db, current_user["user_id"], "sso.mfa_preference_set", {"mfa_level": payload.mfa_level})
+    return {"mfa_level": payload.mfa_level}
+
+
+@router.post("/webauthn/session/register/begin")
+async def session_register_begin(current_user: CurrentUser):
+    """Start passkey enrollment from an already-authenticated SSO session."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    user_id = current_user["user_id"]
+
+    options = generate_registration_options(
+        rp_id=settings.webauthn_rp_id,
+        rp_name=settings.webauthn_rp_name,
+        user_id=user_id.encode("utf-8"),
+        user_name=user_id,
+        user_display_name=current_user.get("full_name") or user_id,
+        attestation=AttestationConveyancePreference.NONE,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            user_verification=UserVerificationRequirement.REQUIRED
+        ),
+    )
+
+    session_id = str(uuid.uuid4())
+    await db.sessions.update_one(
+        {"session_id": session_id},
+        {
+            "$set": {
+                "session_id": session_id,
+                "user_id": user_id,
+                "otp_verified": True,
+                "webauthn_challenge": bytes_to_base64url(options.challenge),
+                "otp_expires_at": now + datetime.timedelta(minutes=10),
+                "updated_at": now,
+                "purpose": "sso_webauthn_enrollment",
+            }
+        },
+        upsert=True,
+    )
+
+    await log_auth_event(db, user_id, "sso.webauthn_register_begin", {})
+    import json
+    options_payload = json.loads(options_to_json(options))
+    options_payload["session_id"] = session_id
+    return options_payload
+
+
+@router.post("/webauthn/session/register/finish")
+async def session_register_finish(
+    payload: WebAuthnSessionRegisterFinishRequest,
+    current_user: CurrentUser,
+):
+    """Finish passkey enrollment from an already-authenticated SSO session."""
+    db = get_db()
+    settings = get_settings()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    user_id = current_user["user_id"]
+
+    session = await db.sessions.find_one({
+        "session_id": payload.session_id,
+        "user_id": user_id,
+        "purpose": "sso_webauthn_enrollment",
+    })
+    if not session or not session.get("webauthn_challenge"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Passkey enrollment has not been initiated.",
+        )
+
+    try:
+        credential = parse_registration_credential_json(payload.registration_response)
+        verification = verify_registration_response(
+            credential=credential,
+            expected_challenge=base64url_to_bytes(session["webauthn_challenge"]),
+            expected_origin=_webauthn_expected_origins(settings),
+            expected_rp_id=settings.webauthn_rp_id,
+            require_user_verification=True,
+        )
+    except Exception as e:
+        expected_origins = _webauthn_expected_origins(settings)
+        await log_auth_event(
+            db,
+            user_id,
+            "sso.webauthn_register_finish_failure",
+            {"error": str(e), "expected_origins": expected_origins},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"WebAuthn registration verification failed: {e}. Expected origins: {expected_origins}",
+        )
+
+    cred_id_str = bytes_to_base64url(verification.credential_id)
+    pub_key_str = bytes_to_base64url(verification.credential_public_key)
+    await db.webauthn_credentials.update_one(
+        {"credential_id": cred_id_str},
+        {
+            "$set": {
+                "user_id": user_id,
+                "public_key": pub_key_str,
+                "sign_counter": verification.sign_counter,
+                "created_at": now,
+            }
+        },
+        upsert=True,
+    )
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"sso_mfa_level": "3fa", "sso_mfa_updated_at": now}},
+    )
+    await db.sessions.delete_one({"session_id": payload.session_id})
+    await log_auth_event(db, user_id, "sso.webauthn_register_finish_success", {"credential_id": cred_id_str})
+    return {"mfa_level": "3fa", "credential_id": cred_id_str}
+
+
 @router.post("/sso-callback", response_model=LoginStep1Response)
 async def sso_callback(payload: SsoCallbackRequest, response: Response) -> LoginStep1Response:
     """
@@ -1011,4 +1200,3 @@ async def sso_callback(payload: SsoCallbackRequest, response: Response) -> Login
         access_token=access_token,
         tenant_id=tenant_id,
     )
-

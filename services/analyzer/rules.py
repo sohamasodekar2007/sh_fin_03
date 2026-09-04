@@ -3,7 +3,13 @@ from __future__ import annotations
 import math
 
 from services.analyzer.models import EBSVolume, Finding, MetricSample
+from services.governance.tags import is_excluded
 
+__all__ = [
+    "is_excluded", "classify_idle", "classify_over_provisioned",
+    "classify_unattached_ebs", "classify_nonprod_schedule", "classify_spend_anomaly",
+    "percentile", "OFF_HOURS",
+]
 
 OFF_HOURS = set(range(0, 8)) | set(range(18, 24))
 
@@ -18,10 +24,6 @@ def percentile(values: list[float], pct: float) -> float:
     if lower == upper:
         return ordered[lower]
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (k - lower)
-
-
-def is_excluded(tags: dict[str, str]) -> bool:
-    return str(tags.get("cloudcare:exclude", "")).lower() == "true"
 
 
 def classify_idle(metrics: list[MetricSample], tags: dict[str, str]) -> Finding | None:

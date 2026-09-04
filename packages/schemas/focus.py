@@ -375,7 +375,7 @@ class FocusDataset(BaseModel):
     tenant_id: str
     provider: str
     account_id: str
-    focus_version: str = "1.0"
+    focus_version: str = "1.2"
 
     # Recorded per-dataset because the real sample data is hourly, not
     # daily — downstream aggregation needs to know which it's looking at.

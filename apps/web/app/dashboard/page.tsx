@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { ShieldCheck, ArrowRight } from "lucide-react";
 import { getDemoSession, type DemoSession } from "@/lib/auth";
 import MonitorAgentControl from "@/components/dashboard/MonitorAgentControl";
 import AnalyzerAgentControl from "@/components/dashboard/AnalyzerAgentControl";
@@ -73,6 +75,25 @@ export default function DashboardPage() {
             <AgentFeed />
             <ResourceTable />
           </div>
+
+          <Link
+            href="/finops"
+            className="group flex items-center justify-between bg-surface border border-line rounded-xl p-5 shadow-card hover:border-brandTeal transition-colors"
+          >
+            <div className="flex items-center gap-3">
+              <span className="w-9 h-9 rounded-full bg-surfaceAlt2 flex items-center justify-center">
+                <ShieldCheck size={16} className="text-brandTeal" />
+              </span>
+              <div>
+                <p className="text-[14px] font-semibold text-ink">FinOps Intelligence</p>
+                <p className="text-[12.5px] text-inkFaint">
+                  Spend velocity guard, cost attribution, and unit economics — SpendShield · DollarTrace · MarginOS
+                </p>
+              </div>
+            </div>
+            <ArrowRight size={16} className="text-inkFaint group-hover:text-brandTeal group-hover:translate-x-0.5 transition-all" />
+          </Link>
+
           <NextSteps />
         </div>
       </div>

@@ -20,6 +20,13 @@ class PolicyAdapter:
 
     ALLOWED_ACTION_TEMPLATES = {
         "ec2.stop.v1",
+        "ec2.start.v1",
+        "ec2.resize.v1",
+        "ec2.schedule.v1",
+        "ebs.delete.v1",
+        # Phase 15
+        "asg.adjust_capacity.v1",
+        "ec2.no_action.v1",
     }
 
     def __init__(

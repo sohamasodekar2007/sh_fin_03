@@ -219,6 +219,26 @@ async def run_all_connected_accounts() -> None:
     )
 
 
+async def refresh_s3_parquet_analysis_job() -> None:
+    """Refresh the dashboard-ready Parquet analysis artifact in S3.
+
+    Uses the same hourly cadence as the CloudCare pipeline and only runs
+    when FOCUS_EXPORT_S3_BUCKET is configured. Failures are logged so a bad
+    export object never prevents the main monitor/analyzer pipeline from
+    running on the next tick.
+    """
+    settings = get_settings()
+    if not settings.focus_export_s3_bucket:
+        logger.info("scheduler: skipping parquet analysis refresh; FOCUS_EXPORT_S3_BUCKET is not configured")
+        return
+    try:
+        from apps.api.routers.parquet_analysis import refresh_s3_parquet_analysis
+
+        refresh_s3_parquet_analysis()
+    except Exception:
+        logger.exception("scheduler: S3 parquet analysis refresh failed")
+
+
 def start_scheduler() -> AsyncIOScheduler | None:
     global _scheduler
     settings = get_settings()
@@ -233,6 +253,15 @@ def start_scheduler() -> AsyncIOScheduler | None:
         "interval",
         minutes=settings.scheduler_interval_minutes,
         id=JOB_ID,
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        refresh_s3_parquet_analysis_job,
+        "interval",
+        minutes=settings.scheduler_interval_minutes,
+        id="s3_parquet_analysis_hourly_rewrite",
         coalesce=True,
         max_instances=1,
         replace_existing=True,

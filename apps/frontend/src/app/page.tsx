@@ -18,6 +18,7 @@ import {
 import { Panel } from "@/components/cfo/Panel";
 import { ThemeToggle } from "@/components/cfo/ThemeToggle";
 import { Button } from "@/components/ui/button";
+import { marketingPages } from "@/components/marketing/landing-pages";
 import { useStage } from "@/lib/motion";
 
 const AGENTS = [
@@ -95,6 +96,17 @@ export default function LandingPage() {
             <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--signal)" }} />
             CloudCare
           </Link>
+          <nav className="hidden items-center gap-5 lg:flex">
+            <Link href="/solutions/cloud-cost-control" className="text-[11.5px] font-medium text-ink-faint hover:text-foreground">
+              Solutions
+            </Link>
+            <Link href="/cloudcare-vs-aws-billing" className="text-[11.5px] font-medium text-ink-faint hover:text-foreground">
+              Vs AWS Billing
+            </Link>
+            <Link href="/dashboard" className="text-[11.5px] font-medium text-ink-faint hover:text-foreground">
+              Dashboard
+            </Link>
+          </nav>
           <div className="flex items-center gap-2">
             <ThemeToggle />
             <Button asChild variant="ghost" size="sm">
@@ -179,6 +191,50 @@ export default function LandingPage() {
               </Panel>
             );
           })}
+        </section>
+
+        {/* ================= solution landing pages ================= */}
+        <section className="mt-5">
+          <Panel
+            eyebrow="What we provide"
+            title="Five powerful landing pages plus the exact CloudCare vs AWS Billing comparison."
+            subtitle="Use these pages to explain why CloudCare is not just another cost chart. It is the FinOps action layer for savings, agents, governance, multi-cloud coverage and executive decisions."
+            delay={340}
+          >
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+              {marketingPages.map((page) => (
+                <Link
+                  key={page.slug}
+                  href={`/solutions/${page.slug}`}
+                  className="group rounded-lg border border-border bg-surface-raised p-4 transition hover:border-signal/60"
+                >
+                  <div className="eyebrow">{page.eyebrow}</div>
+                  <h3 className="mt-3 min-h-[3.5rem] text-lg font-semibold leading-tight text-foreground">
+                    {page.title}
+                  </h3>
+                  <p className="mt-3 text-[12px] leading-relaxed text-ink-faint">{page.accent}</p>
+                  <span className="mt-4 inline-flex items-center gap-2 text-[12px] font-semibold text-signal">
+                    Open page <ArrowRight className="size-3.5 transition group-hover:translate-x-0.5" />
+                  </span>
+                </Link>
+              ))}
+              <Link
+                href="/cloudcare-vs-aws-billing"
+                className="group rounded-lg border border-foreground bg-foreground p-4 text-background transition hover:border-signal"
+              >
+                <div className="eyebrow text-background/55">Comparison</div>
+                <h3 className="mt-3 min-h-[3.5rem] text-lg font-semibold leading-tight">
+                  CloudCare vs AWS Billing
+                </h3>
+                <p className="mt-3 text-[12px] leading-relaxed text-background/65">
+                  AWS Billing is the bill of record. CloudCare is the AI action layer that helps teams reduce spend.
+                </p>
+                <span className="mt-4 inline-flex items-center gap-2 text-[12px] font-semibold text-ember">
+                  Open comparison <ArrowRight className="size-3.5 transition group-hover:translate-x-0.5" />
+                </span>
+              </Link>
+            </div>
+          </Panel>
         </section>
 
         {/* ================= how it works: FOCUS ================= */}

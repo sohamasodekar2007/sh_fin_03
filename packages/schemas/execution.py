@@ -68,6 +68,7 @@ class ExecutionRecord(BaseModel):
 LiveExecutionStatus = Literal[
     "executed",
     "no_op",
+    "rejected",
     "rolled_back",
     "verification_failed",
     "refused",

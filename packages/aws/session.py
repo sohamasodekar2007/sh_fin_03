@@ -96,13 +96,6 @@ class AWSClientFactory:
         return self._assumed_session
 
     def session(self) -> boto3.Session:
-        if self.settings.aws_access_key_id and self.settings.aws_secret_access_key:
-            return boto3.Session(
-                aws_access_key_id=self.settings.aws_access_key_id,
-                aws_secret_access_key=self.settings.aws_secret_access_key,
-                region_name=self.settings.aws_region,
-            )
-
         role_arn = self.settings.aws_role_arn or getattr(self.settings, "aws_read_role_arn", "")
         if role_arn and "arn:aws:iam" in role_arn and "role/" in role_arn:
             if self._session_needs_refresh():
@@ -112,6 +105,13 @@ class AWSClientFactory:
                     print(f"[AWS Session] Assume role error: {e}")
             if self._assumed_session:
                 return self._assumed_session
+
+        if self.settings.aws_access_key_id and self.settings.aws_secret_access_key:
+            return boto3.Session(
+                aws_access_key_id=self.settings.aws_access_key_id,
+                aws_secret_access_key=self.settings.aws_secret_access_key,
+                region_name=self.settings.aws_region,
+            )
 
         return self._base_session()
 

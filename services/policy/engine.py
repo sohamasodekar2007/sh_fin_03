@@ -38,6 +38,11 @@ KNOWN_TEMPLATES = {
     # revisited, but the Executor's delete_volume action is fully real and
     # independently testable today.
     "ebs.delete.v1",
+    # Phase 15 — an idle ASG-managed instance proposes an ASG capacity
+    # adjustment instead of a plain stop; an idle-but-protected/at-minimum
+    # instance proposes an explicit no_action rather than vanishing.
+    "asg.adjust_capacity.v1",
+    "ec2.no_action.v1",
 }
 
 

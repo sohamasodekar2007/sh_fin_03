@@ -4,6 +4,31 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class DependencyContext(BaseModel):
+    """Phase 15 — dependency/ownership facts attached at collection time so
+    they travel WITH a resource (through Finding, through the Decision
+    Agent) instead of being used once, live, at decision-time to silently
+    exclude a candidate (Phase 14's original approach). Every field here is
+    real, collected data, or an honest None/False when it doesn't apply to
+    a given resource type or couldn't be determined — never guessed."""
+
+    in_autoscaling_group: str | None = None  # ASG name, EC2 only
+    asg_desired_capacity: int | None = None
+    asg_min_size: int | None = None
+    load_balancer_targets: list[str] = Field(default_factory=list)  # target group ARNs, EC2 only
+    termination_protected: bool = False  # EC2 only
+
+    multi_az: bool | None = None            # RDS only
+    deletion_protection: bool | None = None # RDS only
+
+    missing_ownership: bool = False  # neither an Owner nor an Environment tag present
+
+    # Always None this phase — Trusted Advisor access returned
+    # AccessDeniedException when tested live; field kept so a future phase
+    # can populate it without a schema change.
+    trusted_advisor_note: str | None = None
+
+
 class EC2ResourceRecord(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
 
@@ -31,6 +56,7 @@ class EC2ResourceRecord(BaseModel):
 
     tags: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    dependency_context: DependencyContext = Field(default_factory=DependencyContext)
 
 
 class EBSVolumeResourceRecord(BaseModel):
@@ -64,6 +90,63 @@ class EBSVolumeResourceRecord(BaseModel):
 
     tags: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+
+
+class _AWSResourceRecordBase(BaseModel):
+    """Shared shape for the "ultimate AWS power" resource types below — same
+    fields as EBSVolumeResourceRecord, minus availability_zone (most of
+    these services aren't AZ-scoped the way EC2/EBS are)."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    provider: Literal["aws"] = "aws"
+
+    region: str
+    resource_id: str
+    name: str
+    environment: str = "unknown"
+
+    instance_type: str
+    state: str
+
+    launched_at: datetime | None = None
+    collected_at: datetime
+
+    tags: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    dependency_context: DependencyContext = Field(default_factory=DependencyContext)
+
+
+class S3BucketResourceRecord(_AWSResourceRecordBase):
+    resource_type: Literal["s3_bucket"] = "s3_bucket"
+
+
+class RDSInstanceResourceRecord(_AWSResourceRecordBase):
+    resource_type: Literal["rds_instance"] = "rds_instance"
+
+
+class LambdaFunctionResourceRecord(_AWSResourceRecordBase):
+    resource_type: Literal["lambda_function"] = "lambda_function"
+
+
+class DynamoDBTableResourceRecord(_AWSResourceRecordBase):
+    resource_type: Literal["dynamodb_table"] = "dynamodb_table"
+
+
+class CloudFrontDistributionResourceRecord(_AWSResourceRecordBase):
+    resource_type: Literal["cloudfront_distribution"] = "cloudfront_distribution"
+
+
+class VPCResourceRecord(_AWSResourceRecordBase):
+    resource_type: Literal["vpc"] = "vpc"
+
+
+class IAMUserResourceRecord(_AWSResourceRecordBase):
+    """Security/hygiene inventory, not a cost resource — IAM has no billable
+    unit of its own, so nothing downstream ever attaches a real cost figure
+    to one of these (observation.py's FOCUS-cost join simply never finds a
+    matching ResourceId, which is correct: None, not a fabricated number)."""
+
+    resource_type: Literal["iam_user"] = "iam_user"
 
 
 class AzureVMResourceRecord(BaseModel):

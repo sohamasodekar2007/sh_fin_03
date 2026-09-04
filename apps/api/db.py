@@ -16,8 +16,12 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from apps.api.config import get_settings
 
 import asyncio
+import time
 
 _client: AsyncIOMotorClient | None = None
+_MONGO_UNAVAILABLE_UNTIL = 0.0
+_MONGO_RECHECK_SECONDS = 5.0
+_MONGO_SERVER_SELECTION_TIMEOUT_MS = 1500
 
 
 def get_client() -> AsyncIOMotorClient:
@@ -35,7 +39,11 @@ def get_client() -> AsyncIOMotorClient:
 
     if _client is None:
         settings = get_settings()
-        _client = AsyncIOMotorClient(settings.mongodb_uri, tz_aware=True)
+        _client = AsyncIOMotorClient(
+            settings.mongodb_uri,
+            tz_aware=True,
+            serverSelectionTimeoutMS=_MONGO_SERVER_SELECTION_TIMEOUT_MS,
+        )
     return _client
 
 
@@ -51,4 +59,24 @@ async def ping() -> bool:
         await get_client().admin.command("ping")
         return True
     except Exception:
+        return False
+
+
+async def mongo_available(timeout_seconds: float = 1.5) -> bool:
+    """Return quickly when Mongo is unreachable.
+
+    Several development/demo endpoints have honest empty-state fallbacks. A
+    short cached probe keeps those routes from blocking on Motor's full server
+    selection timeout for every dashboard request while Mongo is down.
+    """
+    global _MONGO_UNAVAILABLE_UNTIL
+    now = time.monotonic()
+    if now < _MONGO_UNAVAILABLE_UNTIL:
+        return False
+    try:
+        await asyncio.wait_for(get_client().admin.command("ping"), timeout=timeout_seconds)
+        _MONGO_UNAVAILABLE_UNTIL = 0.0
+        return True
+    except Exception:
+        _MONGO_UNAVAILABLE_UNTIL = time.monotonic() + _MONGO_RECHECK_SECONDS
         return False

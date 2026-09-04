@@ -48,7 +48,22 @@ class Resource(BaseModel):
     region: str = "ap-south-1"
     cpu_p95: float
     status: ResourceStatus
-    monthly_cost_usd: float
+    # None when this resource has no real FOCUS BilledCost yet (a genuinely
+    # idle/new resource, or the live export hasn't billed it this period) —
+    # never a fabricated flat estimate. See apps/api/routers/observation.py's
+    # resource-sync step, which joins against the FOCUS dataset it just built.
+    monthly_cost_usd: float | None = None
+    cost_source: Literal["focus_live_export", "focus_synthesized", "focus_sample", "focus_modelled", "no_focus_row"] = "no_focus_row"
+    focus_dataset_id: str | None = None
+    focus_version: str | None = None
+    focus_source: str | None = None
+    focus_row_count: int = 0
+    # "ec2_instance" | "ebs_volume" | provider-specific — lets the frontend
+    # tell resource kinds apart by a real field instead of pattern-matching
+    # the `type` string (which for EBS is a size/SKU label like "500GB-gp3").
+    resource_type: str | None = None
+    provider: str | None = None
+    state: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
     owner: str | None = None
     environment: Literal["dev", "staging", "prod"] = "dev"
@@ -61,7 +76,15 @@ class Resource(BaseModel):
 class ActionProposal(BaseModel):
     proposal_id: UUID = Field(default_factory=uuid4)
     resource_arn: str
-    action_type: Literal["stop_instance", "schedule_instance", "resize_instance"]
+    action_type: Literal[
+        "stop_instance", "schedule_instance", "resize_instance", "delete_volume",
+        # Phase 15 — an ASG-managed idle instance never gets a plain
+        # stop_instance (AWS would just replace it); adjusts desired
+        # capacity instead. no_action is an explicit "considered, declined"
+        # outcome (termination-protected, or ASG already at its minimum) —
+        # visible in the UI instead of the finding silently vanishing.
+        "adjust_asg_capacity", "no_action",
+    ]
     template_id: str
     parameters: dict = Field(default_factory=dict)
     expected_monthly_savings: Decimal
@@ -160,6 +183,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class LoginBypassRequest(BaseModel):
+    user_id: str
+    password: str
+
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -207,6 +235,15 @@ class WebAuthnAuthenticateBeginRequest(BaseModel):
 class WebAuthnAuthenticateFinishRequest(BaseModel):
     temp_token: str
     authentication_response: dict
+
+
+class WebAuthnSessionRegisterFinishRequest(BaseModel):
+    session_id: str
+    registration_response: dict
+
+
+class SsoMfaPreferenceRequest(BaseModel):
+    mfa_level: Literal["none", "2fa", "3fa"]
 
 
 class RegisterRequest(BaseModel):

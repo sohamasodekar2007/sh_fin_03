@@ -30,6 +30,7 @@ settings = get_settings()
 def run_before_and_after_tests():
     # Clear all overrides/mock settings before each test
     mock_db.reset_mock()
+    client.cookies.clear()
     yield
 
 
@@ -74,14 +75,48 @@ def test_login_correct_password_requires_otp_for_non_demo_user():
         assert claims["step"] == "otp"
 
 
-def test_demo_login_bypasses_otp():
+def test_demo_login_requires_otp_by_default():
     user_data = {
         "user_id": "demo.user",
         "hashed_password": pwd_context.hash("password123"),
         "email": "demo.user@example.com",
         "tenant_id": "demo-tenant",
         "failed_login_attempts": 0,
-        "otp_bypass_enabled": True,
+        "otp_bypass_enabled": False,
+    }
+
+    mock_db.users.find_one = AsyncMock(return_value=user_data)
+    mock_db.users.update_one = AsyncMock()
+    mock_db.sessions.update_one = AsyncMock()
+    mock_db.audit_logs.insert_one = AsyncMock()
+
+    with patch("apps.api.routers.auth.send_otp_email_sync"):
+        response = client.post(
+            "/v1/auth/login",
+            json={"user_id": "demo.user", "password": "password123"}
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "otp_required"
+    assert data["user_id"] == "demo.user"
+    assert data["temp_token"]
+    assert data["access_token"] is None
+
+    claims = jwt.decode(data["temp_token"], settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    assert claims["sub"] == "demo.user"
+    assert claims["type"] == "temp_auth"
+    assert claims["step"] == "otp"
+
+
+def test_login_bypass_allows_demo_user_in_development_after_password_check():
+    user_data = {
+        "user_id": "demo.user",
+        "hashed_password": pwd_context.hash("password123"),
+        "email": "demo.user@example.com",
+        "tenant_id": "demo-tenant",
+        "failed_login_attempts": 0,
+        "otp_bypass_enabled": False,
     }
 
     mock_db.users.find_one = AsyncMock(return_value=user_data)
@@ -89,13 +124,12 @@ def test_demo_login_bypasses_otp():
     mock_db.audit_logs.insert_one = AsyncMock()
 
     response = client.post(
-        "/v1/auth/login",
+        "/v1/auth/login/bypass",
         json={"user_id": "demo.user", "password": "password123"}
     )
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "authenticated"
     assert data["user_id"] == "demo.user"
     assert data["tenant_id"] == "demo-tenant"
     assert data["access_token"]
@@ -103,6 +137,65 @@ def test_demo_login_bypasses_otp():
     claims = jwt.decode(data["access_token"], settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     assert claims["sub"] == "demo.user"
     assert claims["type"] == "access"
+
+
+def test_login_bypass_rejects_wrong_password():
+    user_data = {
+        "user_id": "demo.user",
+        "hashed_password": pwd_context.hash("password123"),
+        "email": "demo.user@example.com",
+        "tenant_id": "demo-tenant",
+        "failed_login_attempts": 0,
+        "otp_bypass_enabled": False,
+    }
+
+    mock_db.users.find_one = AsyncMock(return_value=user_data)
+    mock_db.users.update_one = AsyncMock()
+    mock_db.audit_logs.insert_one = AsyncMock()
+
+    response = client.post(
+        "/v1/auth/login/bypass",
+        json={"user_id": "demo.user", "password": "wrong_password"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid user ID or password"
+
+
+def test_login_bypass_requires_user_flag_for_non_demo_user():
+    user_data = {
+        "user_id": "real.user",
+        "hashed_password": pwd_context.hash("password123"),
+        "email": "real.user@example.com",
+        "tenant_id": "demo-tenant",
+        "failed_login_attempts": 0,
+        "otp_bypass_enabled": False,
+    }
+
+    mock_db.users.find_one = AsyncMock(return_value=user_data)
+    mock_db.users.update_one = AsyncMock()
+    mock_db.audit_logs.insert_one = AsyncMock()
+
+    response = client.post(
+        "/v1/auth/login/bypass",
+        json={"user_id": "real.user", "password": "password123"}
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Login bypass is not enabled for this user."
+
+
+def test_login_bypass_forbidden_outside_development():
+    prod_settings = settings.model_copy(update={"app_env": "production"})
+
+    with patch("apps.api.routers.auth.get_settings", return_value=prod_settings):
+        response = client.post(
+            "/v1/auth/login/bypass",
+            json={"user_id": "demo.user", "password": "password123"}
+        )
+
+    assert response.status_code == 403
+    assert "development" in response.json()["detail"]
 
 
 def test_login_wrong_password():
@@ -318,6 +411,83 @@ def test_webauthn_bypass():
     assert claims["sub"] == "demo.user"
     assert claims["tenant_id"] == "demo-tenant"
     assert claims["type"] == "access"
+
+
+def test_webauthn_bypass_forbidden_outside_development():
+    prod_settings = settings.model_copy(update={"app_env": "production"})
+
+    with patch("apps.api.routers.auth.get_settings", return_value=prod_settings):
+        response = client.post(
+            "/v1/auth/webauthn/bypass",
+            json={"temp_token": "unused"}
+        )
+
+    assert response.status_code == 403
+    assert "development" in response.json()["detail"]
+
+
+def test_sso_mfa_preference_persists_to_user_document():
+    user_data = {
+        "user_id": "google:123",
+        "email": "sso@example.com",
+        "tenant_id": "demo-tenant",
+    }
+    access_payload = {
+        "sub": "google:123",
+        "tenant_id": "demo-tenant",
+        "type": "access",
+        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=60)
+    }
+    access_token = jwt.encode(access_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+    mock_db.users.find_one = AsyncMock(return_value=user_data)
+    mock_db.users.update_one = AsyncMock()
+    mock_db.audit_logs.insert_one = AsyncMock()
+
+    response = client.post(
+        "/v1/auth/sso/mfa-preference",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={"mfa_level": "2fa"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mfa_level"] == "2fa"
+    update = mock_db.users.update_one.call_args.args[1]
+    assert update["$set"]["sso_mfa_level"] == "2fa"
+    assert "sso_mfa_updated_at" in update["$set"]
+
+
+def test_sso_session_passkey_registration_begin_saves_challenge():
+    user_data = {
+        "user_id": "github:456",
+        "email": "sso@example.com",
+        "tenant_id": "demo-tenant",
+        "full_name": "SSO User",
+    }
+    access_payload = {
+        "sub": "github:456",
+        "tenant_id": "demo-tenant",
+        "type": "access",
+        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=60)
+    }
+    access_token = jwt.encode(access_payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+    mock_db.users.find_one = AsyncMock(return_value=user_data)
+    mock_db.sessions.update_one = AsyncMock()
+    mock_db.audit_logs.insert_one = AsyncMock()
+
+    response = client.post(
+        "/v1/auth/webauthn/session/register/begin",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["session_id"]
+    update = mock_db.sessions.update_one.call_args.args[1]
+    assert update["$set"]["user_id"] == "github:456"
+    assert update["$set"]["purpose"] == "sso_webauthn_enrollment"
+    assert update["$set"]["webauthn_challenge"]
 
 
 def test_get_current_user_profile():

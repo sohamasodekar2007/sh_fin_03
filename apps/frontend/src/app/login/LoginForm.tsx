@@ -5,7 +5,8 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { signIn, useSession } from "next-auth/react";
-import { Github, Loader2 } from "lucide-react";
+import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
+import { Fingerprint, Github, KeyRound, Loader2, ShieldCheck } from "lucide-react";
 
 import { Panel } from "@/components/cfo/Panel";
 import { ThemeToggle } from "@/components/cfo/ThemeToggle";
@@ -16,7 +17,9 @@ import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp
 import { Separator } from "@/components/ui/separator";
 import { api, isApiError, setToken } from "@/lib/api";
 
-type Step = "password" | "otp";
+type Step = "password" | "otp" | "webauthn" | "sso-mfa";
+type WebAuthnStatus = "webauthn_required" | "webauthn_registration_required";
+type WebAuthnMode = "ready" | "register" | "authenticate" | "unsupported" | "error";
 
 interface LoginStep1Response {
   status: "otp_required" | "authenticated";
@@ -27,17 +30,27 @@ interface LoginStep1Response {
 }
 
 interface OtpVerifyResponse {
-  status: "webauthn_required" | "webauthn_registration_required";
+  status: WebAuthnStatus;
   user_id: string;
   temp_token: string;
 }
 
-interface WebAuthnBypassResponse {
+interface WebAuthnFinishResponse {
   access_token: string;
   token_type: string;
   user_id: string;
-  bypass: boolean;
 }
+
+interface LoginBypassResponse {
+  access_token: string;
+  token_type: string;
+  user_id: string;
+  tenant_id: string;
+}
+
+type SsoRegisterOptions = Parameters<typeof startRegistration>[0] & {
+  session_id: string;
+};
 
 function FormError({ message }: { message: string | null }) {
   if (!message) return null;
@@ -46,7 +59,11 @@ function FormError({ message }: { message: string | null }) {
       role="alert"
       aria-live="assertive"
       className="rounded-md border px-3 py-2 text-[12.5px] leading-relaxed"
-      style={{ borderColor: "var(--destructive)", color: "var(--destructive)", background: "color-mix(in oklab, var(--destructive) 8%, transparent)" }}
+      style={{
+        borderColor: "var(--destructive)",
+        color: "var(--destructive)",
+        background: "color-mix(in oklab, var(--destructive) 8%, transparent)",
+      }}
     >
       {message}
     </div>
@@ -65,11 +82,6 @@ function GoogleIcon() {
 }
 
 interface LoginFormProps {
-  /** Read server-side from AUTH_GOOGLE_ID / AUTH_GITHUB_ID (see page.tsx) —
-   * NextAuth registers both providers unconditionally in src/auth.ts, so
-   * without this the buttons below would navigate straight into NextAuth's
-   * raw "Server error / problem with the server configuration" page
-   * instead of failing inside our own UI. */
   googleEnabled: boolean;
   githubEnabled: boolean;
 }
@@ -84,15 +96,18 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
     return raw.startsWith("/") && !raw.startsWith("//") ? raw : "/dashboard";
   })();
 
-  // ---- credentials flow ----
   const [step, setStep] = useState<Step>("password");
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
   const [tempToken, setTempToken] = useState("");
-  const [loading, setLoading] = useState<"password" | "otp" | "google" | "github" | null>(null);
+  const [webauthnStatus, setWebauthnStatus] = useState<WebAuthnStatus>("webauthn_registration_required");
+  const [webauthnMode, setWebauthnMode] = useState<WebAuthnMode>("ready");
+  const [loading, setLoading] = useState<"password" | "otp" | "webauthn" | "sso-continue" | "sso-2fa" | "sso-3fa" | "bypass" | "google" | "github" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resendCooldown, setResendCooldown] = useState(0);
+  const [otpTimeLeft, setOtpTimeLeft] = useState(0);
+  const [ssoAccessToken, setSsoAccessToken] = useState("");
 
   useEffect(() => {
     if (resendCooldown <= 0) return;
@@ -100,23 +115,33 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
     return () => clearTimeout(t);
   }, [resendCooldown]);
 
-  // ---- SSO return: once NextAuth has a session with a CloudCare token
-  // attached (src/auth.ts), finish the handoff and redirect. Deliberately
-  // done here (not only in SessionSync) so the redirect only fires once
-  // the token is actually stored — see middleware.ts's cookie check,
-  // which would otherwise race a redirect straight to a protected route.
+  useEffect(() => {
+    if (otpTimeLeft <= 0) return;
+    const t = setTimeout(() => setOtpTimeLeft((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [otpTimeLeft]);
+
   useEffect(() => {
     if (sessionStatus !== "authenticated") return;
     const token = (session as { cloudcareAccessToken?: string } | null)?.cloudcareAccessToken;
     if (!token) return;
     setToken(token);
-    router.replace(returnTo);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setSsoAccessToken(token);
+    setStep("sso-mfa");
   }, [session, sessionStatus]);
 
-  async function completeLogin(access_token: string) {
-    setToken(access_token);
+  async function completeLogin(accessToken: string) {
+    setToken(accessToken);
     router.push(returnTo);
+  }
+
+  function resetToPassword() {
+    setStep("password");
+    setOtp("");
+    setTempToken("");
+    setWebauthnMode("ready");
+    setError(null);
+    setOtpTimeLeft(0);
   }
 
   async function handlePasswordSubmit(e: React.FormEvent) {
@@ -137,9 +162,31 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
         setTempToken(data.temp_token);
         setStep("otp");
         setResendCooldown(60);
+        setOtpTimeLeft(300);
       }
     } catch (err) {
       setError(isApiError(err) ? err.message : "Could not reach the CloudCare API.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function handleBypassLogin() {
+    setError(null);
+    if (!userId || !password) {
+      setError("Enter your user ID and password before using bypass.");
+      return;
+    }
+
+    setLoading("bypass");
+    try {
+      const data = await api.post<LoginBypassResponse>("/v1/auth/login/bypass", {
+        user_id: userId,
+        password,
+      });
+      await completeLogin(data.access_token);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "Bypass login failed.");
     } finally {
       setLoading(null);
     }
@@ -155,16 +202,54 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
     setLoading("otp");
     try {
       const verified = await api.post<OtpVerifyResponse>("/v1/auth/otp/verify", { temp_token: tempToken, otp });
-      // Third factor (WebAuthn) is intentionally skipped from the UI — see
-      // apps/api/routers/auth.py's webauthn/bypass endpoint, left in place
-      // unmodified so a real third factor can be switched on later without
-      // a rewrite. Called here silently: no WebAuthn prompt is ever shown.
-      const bypassed = await api.post<WebAuthnBypassResponse>("/v1/auth/webauthn/bypass", {
-        temp_token: verified.temp_token,
-      });
-      await completeLogin(bypassed.access_token);
+      setTempToken(verified.temp_token);
+      setWebauthnStatus(verified.status);
+      setWebauthnMode("ready");
+      setStep("webauthn");
+      void runWebAuthn(verified.temp_token, verified.status);
     } catch (err) {
       setError(isApiError(err) ? err.message : "Verification failed.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function runWebAuthn(token = tempToken, status = webauthnStatus) {
+    setError(null);
+    if (!window.PublicKeyCredential) {
+      setWebauthnMode("unsupported");
+      return;
+    }
+
+    setLoading("webauthn");
+    try {
+      if (status === "webauthn_registration_required") {
+        setWebauthnMode("register");
+        const options = await api.post<Parameters<typeof startRegistration>[0]>("/v1/auth/webauthn/register/begin", {
+          temp_token: token,
+        });
+        const credential = await startRegistration(options);
+        const result = await api.post<WebAuthnFinishResponse>("/v1/auth/webauthn/register/finish", {
+          temp_token: token,
+          registration_response: credential,
+        });
+        await completeLogin(result.access_token);
+        return;
+      }
+
+      setWebauthnMode("authenticate");
+      const options = await api.post<Parameters<typeof startAuthentication>[0]>("/v1/auth/webauthn/authenticate/begin", {
+        temp_token: token,
+      });
+      const credential = await startAuthentication(options);
+      const result = await api.post<WebAuthnFinishResponse>("/v1/auth/webauthn/authenticate/finish", {
+        temp_token: token,
+        authentication_response: credential,
+      });
+      await completeLogin(result.access_token);
+    } catch (err) {
+      setWebauthnMode("error");
+      setError(isApiError(err) ? err.message : err instanceof Error ? err.message : "Passkey verification failed.");
     } finally {
       setLoading(null);
     }
@@ -176,6 +261,8 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
     try {
       await api.post("/v1/auth/otp/resend", { temp_token: tempToken });
       setResendCooldown(60);
+      setOtpTimeLeft(300);
+      setOtp("");
     } catch (err) {
       setError(isApiError(err) ? err.message : "Could not resend the code.");
     }
@@ -191,7 +278,61 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
     }
   }
 
+  async function continueSsoWithoutMfa() {
+    if (!ssoAccessToken) return;
+    setLoading("sso-continue");
+    try {
+      await api.post("/v1/auth/sso/mfa-preference", { mfa_level: "none" });
+      await completeLogin(ssoAccessToken);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "Could not save your SSO preference.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function enableSso2fa() {
+    if (!ssoAccessToken) return;
+    setLoading("sso-2fa");
+    try {
+      await api.post("/v1/auth/sso/mfa-preference", { mfa_level: "2fa" });
+      await completeLogin(ssoAccessToken);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "Could not enable SSO 2FA.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function enableSso3fa() {
+    if (!ssoAccessToken) return;
+    setError(null);
+    if (!window.PublicKeyCredential) {
+      setError("This browser does not support passkeys.");
+      return;
+    }
+
+    setLoading("sso-3fa");
+    try {
+      const options = await api.post<SsoRegisterOptions>("/v1/auth/webauthn/session/register/begin");
+      const { session_id: sessionId, ...registrationOptions } = options;
+      const credential = await startRegistration(registrationOptions);
+      await api.post("/v1/auth/webauthn/session/register/finish", {
+        session_id: sessionId,
+        registration_response: credential,
+      });
+      await completeLogin(ssoAccessToken);
+    } catch (err) {
+      setError(isApiError(err) ? err.message : err instanceof Error ? err.message : "Could not enable SSO 3FA.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
   const ssoConfigured = googleEnabled || githubEnabled;
+  const otpClock = `${Math.floor(otpTimeLeft / 60)
+    .toString()
+    .padStart(2, "0")}:${(otpTimeLeft % 60).toString().padStart(2, "0")}`;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-6 py-12">
@@ -205,10 +346,64 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
         </div>
 
         <div className="grid gap-5 md:grid-cols-2">
-          {/* ---- credentials ---- */}
-          <Panel eyebrow="Sign in" title="Username & password" subtitle="Password, then a one-time code — two factors.">
+          <Panel
+            eyebrow="Secure sign in"
+            title={step === "sso-mfa" ? "Add extra protection?" : "Password, code, passkey"}
+            subtitle={
+              step === "sso-mfa"
+                ? "Choose how strongly to protect future Google or GitHub sign-ins."
+                : "Three factors: something you know, receive, and physically unlock."
+            }
+          >
+            {step === "sso-mfa" && (
+              <div className="flex flex-col gap-4">
+                <div className="rounded-md border border-border bg-muted/35 p-4">
+                  <div className="grid gap-3 text-[12px] text-ink-faint">
+                    <div className="flex items-start gap-2">
+                      <ShieldCheck className="mt-0.5 size-4 text-primary" />
+                      <span>2FA saves your SSO account as requiring an additional verification policy.</span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <Fingerprint className="mt-0.5 size-4 text-primary" />
+                      <span>3FA enrolls a real device passkey before your dashboard session continues.</span>
+                    </div>
+                  </div>
+                </div>
+                <FormError message={error} />
+                <div className="grid gap-2">
+                  <Button type="button" onClick={enableSso3fa} disabled={loading !== null}>
+                    {loading === "sso-3fa" ? <Loader2 className="size-4 animate-spin" /> : <Fingerprint className="size-4" />}
+                    Add 3FA passkey
+                  </Button>
+                  <Button type="button" variant="outline" onClick={enableSso2fa} disabled={loading !== null}>
+                    {loading === "sso-2fa" ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+                    Add 2FA policy
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={continueSsoWithoutMfa} disabled={loading !== null}>
+                    {loading === "sso-continue" && <Loader2 className="size-4 animate-spin" />}
+                    Continue without extra factor
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {step === "password" && (
               <form onSubmit={handlePasswordSubmit} className="flex flex-col gap-4" noValidate>
+                <div className="grid grid-cols-3 gap-2 rounded-md border border-border bg-muted/35 p-2 text-[11px] font-medium text-ink-faint">
+                  <div className="flex items-center gap-1.5 text-foreground">
+                    <KeyRound className="size-3.5" />
+                    Password
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <ShieldCheck className="size-3.5" />
+                    OTP
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Fingerprint className="size-3.5" />
+                    Passkey
+                  </div>
+                </div>
+
                 <div className="grid gap-1.5">
                   <Label htmlFor="userId">User ID</Label>
                   <Input
@@ -227,7 +422,7 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••"
+                    placeholder="password"
                     autoComplete="current-password"
                     disabled={loading !== null}
                   />
@@ -255,24 +450,22 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
                       <InputOTPSlot index={5} />
                     </InputOTPGroup>
                   </InputOTP>
-                  <p className="text-[11.5px] text-ink-faint">Sent to the email on file. Expires in 5 minutes.</p>
+                  <p className="text-[11.5px] text-ink-faint">
+                    Sent to the email on file. Expires in <span className="num">{otpClock}</span>.
+                  </p>
                 </div>
                 <FormError message={error} />
-                <Button type="submit" disabled={loading !== null || otp.length !== 6}>
+                <Button type="submit" disabled={loading !== null || otp.length !== 6 || otpTimeLeft === 0}>
                   {loading === "otp" && <Loader2 className="size-4 animate-spin" />}
-                  Verify
+                  Verify code
                 </Button>
                 <div className="flex items-center justify-between">
                   <button
                     type="button"
-                    onClick={() => {
-                      setStep("password");
-                      setOtp("");
-                      setError(null);
-                    }}
+                    onClick={resetToPassword}
                     className="text-[12px] font-medium text-ink-faint hover:text-foreground"
                   >
-                    ← Back
+                    Back
                   </button>
                   <button
                     type="button"
@@ -285,9 +478,45 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
                 </div>
               </form>
             )}
+
+            {step === "webauthn" && (
+              <div className="flex flex-col gap-4">
+                <div className="rounded-md border border-border bg-muted/35 p-4 text-center">
+                  <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-md bg-primary/10 text-primary">
+                    {loading === "webauthn" ? <Loader2 className="size-5 animate-spin" /> : <Fingerprint className="size-5" />}
+                  </div>
+                  <p className="text-sm font-semibold text-foreground">
+                    {webauthnMode === "register"
+                      ? "Create your device passkey"
+                      : webauthnMode === "authenticate"
+                        ? "Unlock with your passkey"
+                        : webauthnMode === "unsupported"
+                          ? "Passkeys are not available"
+                          : "Passkey required"}
+                  </p>
+                  <p className="mt-1 text-[11.5px] leading-relaxed text-ink-faint">
+                    {webauthnStatus === "webauthn_registration_required"
+                      ? "This device will be enrolled before your session is issued."
+                      : "Use Windows Hello, Touch ID, Face ID, a PIN, or a security key to finish sign-in."}
+                  </p>
+                </div>
+                <FormError message={error} />
+                <Button type="button" onClick={() => runWebAuthn()} disabled={loading !== null || webauthnMode === "unsupported"}>
+                  {loading === "webauthn" && <Loader2 className="size-4 animate-spin" />}
+                  {webauthnStatus === "webauthn_registration_required" ? "Enroll passkey" : "Verify passkey"}
+                </Button>
+                <button
+                  type="button"
+                  onClick={resetToPassword}
+                  disabled={loading !== null}
+                  className="text-[12px] font-medium text-ink-faint hover:text-foreground disabled:opacity-50"
+                >
+                  Start over
+                </button>
+              </div>
+            )}
           </Panel>
 
-          {/* ---- SSO ---- */}
           <Panel eyebrow="Sign in" title="Single sign-on" subtitle="One click. Google or GitHub." delay={80}>
             <div className="flex flex-col gap-3">
               <Button
@@ -295,7 +524,7 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
                 variant="outline"
                 onClick={() => handleSso("google")}
                 disabled={loading !== null || !googleEnabled}
-                title={googleEnabled ? undefined : "Not configured — set AUTH_GOOGLE_ID / AUTH_GOOGLE_SECRET"}
+                title={googleEnabled ? undefined : "Not configured. Set AUTH_GOOGLE_ID / AUTH_GOOGLE_SECRET."}
               >
                 {loading === "google" ? <Loader2 className="size-4 animate-spin" /> : <GoogleIcon />}
                 Continue with Google
@@ -305,7 +534,7 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
                 variant="outline"
                 onClick={() => handleSso("github")}
                 disabled={loading !== null || !githubEnabled}
-                title={githubEnabled ? undefined : "Not configured — set AUTH_GITHUB_ID / AUTH_GITHUB_SECRET"}
+                title={githubEnabled ? undefined : "Not configured. Set AUTH_GITHUB_ID / AUTH_GITHUB_SECRET."}
               >
                 {loading === "github" ? <Loader2 className="size-4 animate-spin" /> : <Github className="size-4" />}
                 Continue with GitHub
@@ -313,20 +542,31 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
               <Separator className="my-1" />
               {ssoConfigured ? (
                 <p className="text-[11.5px] leading-relaxed text-ink-faint">
-                  First sign-in creates your CloudCare account automatically. Returning users are
-                  linked by email if they already have a password account.
+                  First sign-in creates your CloudCare account automatically. Returning users are linked by email if
+                  they already have a password account.
                 </p>
               ) : (
                 <p role="status" className="text-[11.5px] leading-relaxed" style={{ color: "var(--ember)" }}>
-                  Single sign-on isn&apos;t configured on this deployment yet — set
-                  AUTH_GOOGLE_ID/SECRET and AUTH_GITHUB_ID/SECRET in apps/frontend/.env.local
-                  (see .env.local.example) to enable it.
+                  Single sign-on is not configured on this deployment yet. Set AUTH_GOOGLE_ID/SECRET and
+                  AUTH_GITHUB_ID/SECRET in apps/frontend/.env.local to enable it.
                 </p>
               )}
             </div>
           </Panel>
         </div>
       </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={handleBypassLogin}
+        disabled={loading !== null}
+        className="fixed bottom-4 right-4 z-20 border-amber-500/50 bg-background/95 text-amber-700 shadow-sm backdrop-blur hover:bg-amber-500/10 dark:text-amber-300"
+        title="Development/demo only. Verifies password, then skips OTP and passkey."
+      >
+        {loading === "bypass" ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+        Bypass 2FA/3FA
+      </Button>
     </div>
   );
 }

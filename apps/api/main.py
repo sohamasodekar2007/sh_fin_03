@@ -11,14 +11,19 @@ from apps.api.db import get_db
 from apps.api.routers import (
     accounts_runs,
     agent_activity,
+    agent_command,
     analysis,
     auth,
     chat,
     decision,
     execution,
+    external_factors,
     focus_summary,
     forecasts_savings,
+    governance,
     observation,
+    parquet_analysis,
+    phase14,
     pipeline,
     recommendations,
     resources,
@@ -48,6 +53,8 @@ async def lifespan(app: FastAPI):
         await ensure_execution_lock_index(db)
         await ensure_live_audit_indexes(db)
         await ensure_chat_indexes(db)
+        await auth.ensure_auth_indexes(db)
+        await agent_command.ensure_agent_command_indexes(db)
     except Exception as exc:  # noqa: BLE001 - index setup must never block startup
         logger.warning("lifespan: index setup warning: %s", exc)
 
@@ -113,18 +120,23 @@ app.add_middleware(CorsSafeErrorMiddleware)
 
 app.include_router(auth.router)
 app.include_router(observation.router)
+app.include_router(parquet_analysis.router)
 app.include_router(analysis.router)
 app.include_router(decision.router)
 app.include_router(resources.router)
 app.include_router(agent_activity.router)
+app.include_router(agent_command.router)
 app.include_router(recommendations.router)
 app.include_router(forecasts_savings.router)
 app.include_router(accounts_runs.router)
 app.include_router(pipeline.router)
 app.include_router(supervisor.router)
 app.include_router(execution.router)
+app.include_router(external_factors.router)
 app.include_router(chat.router)
 app.include_router(focus_summary.router)
+app.include_router(governance.router)
+app.include_router(phase14.router)
 
 
 @app.get("/")

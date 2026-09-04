@@ -60,6 +60,20 @@ def _service_fields(resource_type: str | None) -> tuple[str, str]:
     """
     if resource_type == "ebs_volume":
         return "Amazon Elastic Block Store", "Storage"
+    if resource_type == "s3_bucket":
+        return "Amazon Simple Storage Service", "Storage"
+    if resource_type == "rds_instance":
+        return "Amazon Relational Database Service", "Databases"
+    if resource_type == "lambda_function":
+        return "AWS Lambda", "Compute"
+    if resource_type == "dynamodb_table":
+        return "Amazon DynamoDB", "Databases"
+    if resource_type == "cloudfront_distribution":
+        return "Amazon CloudFront", "Networking"
+    if resource_type == "vpc":
+        return "Amazon Virtual Private Cloud", "Networking"
+    if resource_type == "iam_user":
+        return "AWS Identity and Access Management", "Identity"
     # Default / ec2_instance / anything unrecognized.
     return "Amazon Elastic Compute Cloud - Compute", "Compute"
 
@@ -73,7 +87,7 @@ def _billing_period_bounds(charge_start: datetime) -> tuple[datetime, datetime]:
     return month_start, next_month_start
 
 
-def _synthesize_from_snapshot(snapshot: dict[str, Any], tenant_id: str) -> FocusDataset:
+def _synthesize_from_snapshot(snapshot: dict[str, Any], tenant_id: str, focus_version: str = "1.2") -> FocusDataset:
     account_id = str(snapshot.get("account_id", ""))
     resources: list[dict[str, Any]] = snapshot.get("resources") or []
     daily_costs: list[dict[str, Any]] = snapshot.get("daily_costs") or []
@@ -87,6 +101,7 @@ def _synthesize_from_snapshot(snapshot: dict[str, Any], tenant_id: str) -> Focus
             tenant_id=tenant_id,
             provider="aws",
             account_id=account_id,
+            focus_version=focus_version,
             granularity="daily",
             source="synthesized",
             row_count=0,
@@ -232,6 +247,7 @@ def _synthesize_from_snapshot(snapshot: dict[str, Any], tenant_id: str) -> Focus
         tenant_id=tenant_id,
         provider="aws",
         account_id=account_id,
+        focus_version=focus_version,
         granularity="daily",
         source="synthesized",
         row_count=len(records),
@@ -248,6 +264,7 @@ def _read_live_export(
     aws_access_key_id: str | None = None,
     aws_secret_access_key: str | None = None,
     region_name: str | None = None,
+    focus_version: str = "1.2",
 ) -> FocusDataset | None:
     """
     Read the most recent AWS Data Exports FOCUS 1.0/1.2 delivery (Parquet or
@@ -322,6 +339,7 @@ def _read_live_export(
             tenant_id=tenant_id,
             provider="aws",
             account_id=account_id,
+            focus_version=focus_version,
             granularity="daily",
             source="live_export",
             row_count=len(records),
@@ -342,6 +360,7 @@ def map_snapshot_to_focus(
     aws_access_key_id: str | None = None,
     aws_secret_access_key: str | None = None,
     aws_region: str | None = None,
+    focus_version: str = "1.2",
 ) -> FocusDataset:
     """
     Map an AWS CloudSnapshot dict into a FocusDataset. Tries a real FOCUS
@@ -355,8 +374,9 @@ def map_snapshot_to_focus(
         aws_access_key_id=aws_access_key_id,
         aws_secret_access_key=aws_secret_access_key,
         region_name=aws_region,
+        focus_version=focus_version,
     )
     if live is not None:
         return live
 
-    return _synthesize_from_snapshot(snapshot, tenant_id)
+    return _synthesize_from_snapshot(snapshot, tenant_id, focus_version=focus_version)

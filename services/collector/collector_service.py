@@ -3,9 +3,15 @@ from typing import Any
 
 from packages.schemas.cloud_metrics import DailyCost
 from packages.schemas.cloud_snapshot import CloudSnapshot, CollectionIssue
+from services.collector.cloudfront_collector import CloudFrontCollector
 from services.collector.cloudwatch_collector import CloudWatchCollector
 from services.collector.cost_collector import CostExplorerCollector
-from services.collector.ec2_collector import EBSCollector, EC2Collector
+from services.collector.dynamodb_collector import DynamoDBCollector
+from services.collector.ec2_collector import EBSCollector, EC2Collector, VPCCollector
+from services.collector.iam_collector import IAMCollector
+from services.collector.lambda_collector import LambdaCollector
+from services.collector.rds_collector import RDSCollector
+from services.collector.s3_collector import S3Collector
 
 
 class AWSCollectorService:
@@ -102,6 +108,27 @@ class AWSCollectorService:
         )
         return collector.collect()
 
+    def _run_vpc_collector(self) -> list[Any]:
+        return VPCCollector(client_factory=self.client_factory, region=self.region).collect()
+
+    def _run_s3_collector(self) -> list[Any]:
+        return S3Collector(client_factory=self.client_factory, region=self.region).collect()
+
+    def _run_rds_collector(self) -> list[Any]:
+        return RDSCollector(client_factory=self.client_factory, region=self.region).collect()
+
+    def _run_lambda_collector(self) -> list[Any]:
+        return LambdaCollector(client_factory=self.client_factory, region=self.region).collect()
+
+    def _run_dynamodb_collector(self) -> list[Any]:
+        return DynamoDBCollector(client_factory=self.client_factory, region=self.region).collect()
+
+    def _run_cloudfront_collector(self) -> list[Any]:
+        return CloudFrontCollector(client_factory=self.client_factory).collect()
+
+    def _run_iam_collector(self) -> list[Any]:
+        return IAMCollector(client_factory=self.client_factory).collect()
+
     def _get_daily_costs(
         self,
         force_refresh: bool = False,
@@ -178,6 +205,27 @@ class AWSCollectorService:
 
         except Exception as error:
             issues.append(self._issue("ebs", error))
+
+        # "Ultimate AWS power" collectors — S3, RDS, Lambda, DynamoDB,
+        # CloudFront, VPC, IAM. Each is fully independent: one service's
+        # AccessDenied must never take another down, and a failure always
+        # becomes a visible CollectionIssue, never a silent empty result
+        # that could be mistaken for "you truly have zero of these."
+        for source, runner in (
+            ("vpc", self._run_vpc_collector),
+            ("s3", self._run_s3_collector),
+            ("rds", self._run_rds_collector),
+            ("lambda_fn", self._run_lambda_collector),
+            ("dynamodb", self._run_dynamodb_collector),
+            ("cloudfront", self._run_cloudfront_collector),
+            ("iam", self._run_iam_collector),
+        ):
+            try:
+                raw = runner()
+                resources.extend(self._normalize_resource(item) for item in raw)
+                successful_sources += 1
+            except Exception as error:
+                issues.append(self._issue(source, error))
 
         if ec2_succeeded:
             try:

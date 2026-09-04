@@ -375,6 +375,60 @@ def execute(state: dict) -> dict:
     return {"execution_log": execution_log, "status": "executing", **_trace_event("Executor", {"executed": 1})}
 
 
+def supervise(state: dict) -> dict:
+    """Evaluate proposals and stop at human review."""
+    from services.policy import engine as policy_engine
+
+    proposals = state.get("proposals", [])
+    reviews: list[dict] = []
+    for proposal in proposals:
+        tags = proposal.get("tags") or {}
+        result = policy_engine.evaluate(
+            environment=proposal.get("environment", "unknown"),
+            risk_level=proposal.get("risk_level", "high"),
+            template_id=proposal.get("template_id", ""),
+            has_owner_tag=bool(tags.get("Owner") or tags.get("owner")),
+            is_protected=str(tags.get("Protected", tags.get("protected", ""))).lower() == "true",
+        )
+        reviews.append(
+            {
+                "proposal_id": proposal.get("proposal_id"),
+                "decision": "blocked" if not result.approved else "human_review",
+                "auto_execute": False,
+                "requires_human_approval": result.approved,
+                "reason": result.reason,
+            }
+        )
+
+    blocked = sum(1 for review in reviews if review["decision"] == "blocked")
+    pending = len(reviews) - blocked
+    return {
+        "approvals": reviews,
+        "supervisor_decision": "human_review",
+        "status": "review",
+        **_trace_event("Supervisor", {"pending_human_review": pending, "blocked": blocked}),
+    }
+
+
+def execute(state: dict) -> dict:
+    """Do not fake AWS execution from the in-memory graph."""
+    approved = [p for p in state.get("proposals", []) if p.get("status") == "approved"]
+    execution_log = [
+        {
+            "proposal_id": p.get("proposal_id"),
+            "action_type": p.get("action_type"),
+            "result": "awaiting_http_executor_dispatch",
+            "actual_aws_call_made": False,
+        }
+        for p in approved
+    ]
+    return {
+        "execution_log": execution_log,
+        "status": "executing" if execution_log else "review",
+        **_trace_event("Executor", {"queued": len(execution_log), "actual_aws_calls": 0}),
+    }
+
+
 def verify(state: dict) -> dict:
     # TODO: call app.services.verifier.health / savings — see blueprint 10.3.
     feedback = [{"status": "verified", "realized_savings": 14.20}]

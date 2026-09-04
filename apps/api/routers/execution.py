@@ -21,6 +21,19 @@ from services.verifier.health import verify_execution
 router = APIRouter(prefix="/v1", tags=["executor"])
 
 
+def _execution_update_fields(record: LiveExecutionRecord) -> dict[str, Any]:
+    return {
+        "execution_id": record.execution_id,
+        "execution_status": record.status,
+        "execution_mode": record.execution_mode,
+        "execution_reason_codes": record.reason_codes,
+        "execution_before_state": record.before_state,
+        "execution_after_state": record.after_state,
+        "execution_rollback_descriptor": record.rollback_descriptor,
+        "actual_aws_call_made": record.actual_aws_call_made,
+    }
+
+
 async def _record_from_doc(doc: dict[str, Any]) -> LiveExecutionRecord:
     doc = dict(doc)
     doc.pop("_id", None)
@@ -74,11 +87,16 @@ async def execute_proposal(
         except ExecutionRefused:
             verification = None
 
+    update_fields = _execution_update_fields(record)
     if record.status in ("executed", "no_op"):
-        await db.proposals.update_one(
-            {"proposal_id": proposal_id, "tenant_id": tenant_id},
-            {"$set": {"status": "executed", "execution_id": record.execution_id}},
-        )
+        update_fields["status"] = "executed"
+
+    await db.proposals.update_one(
+        {"proposal_id": proposal_id, "tenant_id": tenant_id},
+        {"$set": update_fields},
+    )
+
+    if record.status in ("executed", "no_op"):
         await _dispatch_completion_email(db, background_tasks, tenant_id, proposal_doc, record)
 
     return {"execution": record.model_dump(mode="json"), "verification": verification}

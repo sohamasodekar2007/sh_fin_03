@@ -85,6 +85,8 @@ def analyze_observation(
     for the same tenant. Ignored on the legacy path unless explicitly
     provided — a legacy CloudSnapshot's own cpu_metrics is used instead.
     """
+    dependency_context_by_resource: dict[str, dict[str, Any]] = {}
+
     if isinstance(observation, FocusDataset):
         dataset = observation
         metrics_by_resource = _index_metrics(resource_metrics or [])
@@ -94,10 +96,23 @@ def analyze_observation(
     elif isinstance(observation, dict):
         dataset, legacy_metrics = _convert_legacy_snapshot(observation)
         metrics_by_resource = _index_metrics(resource_metrics) if resource_metrics else legacy_metrics
+        # Phase 15 — dependency_context (ASG/LB/termination-protection/
+        # missing-ownership) lives on the raw CloudSnapshot resource dicts
+        # the collector produced, not on FocusRecord — real AWS billing
+        # exports (the "live_export" FOCUS source) have no way to carry an
+        # AWS-API-derived fact like ASG membership, so this is read
+        # straight from the pre-FOCUS resources list rather than threaded
+        # through the FOCUS mapper, and works identically regardless of
+        # which FOCUS source (live_export vs synthesized) was used.
+        for resource in observation.get("resources", []):
+            rid = resource.get("resource_id") or resource.get("instance_id") or resource.get("id")
+            dep_ctx = resource.get("dependency_context")
+            if rid and dep_ctx:
+                dependency_context_by_resource[rid] = dep_ctx
     else:
         raise TypeError(f"Unsupported observation type: {type(observation)!r}")
 
-    return _analyze(dataset, metrics_by_resource)
+    return _analyze(dataset, metrics_by_resource, dependency_context_by_resource)
 
 
 # ---------------------------------------------------------------------------
@@ -262,14 +277,30 @@ def _focus_citation(representative: FocusRecord) -> dict[str, Any]:
     }
 
 
-def _enrich(finding, resource_id: str, provenance: dict[str, Any], citation: dict[str, Any]) -> dict[str, Any]:
+def _enrich(
+    finding,
+    resource_id: str,
+    provenance: dict[str, Any],
+    citation: dict[str, Any],
+    dependency_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     doc = finding.to_dict(resource_id)
     doc.update(provenance)
     doc["evidence"] = {**doc["evidence"], "focus_columns": citation}
+    # Phase 15 — never dropped for having a dependency (ASG/LB/etc) now;
+    # attached here so it's visible on the Finding itself, not just used
+    # internally by services/decision/service.py::build_proposals (which
+    # reads it independently, straight off the resource dict it's given).
+    doc["dependency_context"] = dependency_context or {}
     return doc
 
 
-def _analyze(dataset: FocusDataset, metrics_by_resource: dict[str, ResourceMetric]) -> list[dict[str, Any]]:
+def _analyze(
+    dataset: FocusDataset,
+    metrics_by_resource: dict[str, ResourceMetric],
+    dependency_context_by_resource: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    dependency_context_by_resource = dependency_context_by_resource or {}
     findings: list[dict[str, Any]] = []
 
     records_by_resource: dict[str, list[FocusRecord]] = defaultdict(list)
@@ -294,6 +325,8 @@ def _analyze(dataset: FocusDataset, metrics_by_resource: dict[str, ResourceMetri
         provenance = _provenance(representative, dataset, records)
         citation = _focus_citation(representative)
 
+        dep_ctx = dependency_context_by_resource.get(resource_id)
+
         if representative.ServiceCategory == "Compute":
             samples = _metric_samples_for(metrics_by_resource.get(resource_id))
             for finding in (
@@ -302,7 +335,7 @@ def _analyze(dataset: FocusDataset, metrics_by_resource: dict[str, ResourceMetri
                 classify_nonprod_schedule(samples, tags, environment),
             ):
                 if finding:
-                    findings.append(_enrich(finding, resource_id, provenance, citation))
+                    findings.append(_enrich(finding, resource_id, provenance, citation, dep_ctx))
 
         if (
             representative.ServiceCategory == "Storage"
@@ -312,7 +345,7 @@ def _analyze(dataset: FocusDataset, metrics_by_resource: dict[str, ResourceMetri
             volume = _ebs_volume_from_records(resource_id, records)
             finding = classify_unattached_ebs(volume, tags)
             if finding:
-                findings.append(_enrich(finding, resource_id, provenance, citation))
+                findings.append(_enrich(finding, resource_id, provenance, citation, dep_ctx))
 
     # Item 2: spend anomaly on the FOCUS BilledCost time series, grouped by
     # (ServiceName, ResourceId) — daily totals, not per-charge-row, so

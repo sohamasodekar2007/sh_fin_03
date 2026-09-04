@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock
 
-from services.decision.service import enrich_proposals_with_llm
+from services.decision.service import build_proposals, enrich_proposals_with_llm
 from services.llm.client import LLMUnavailable
 
 
@@ -112,3 +112,37 @@ def test_action_type_is_never_taken_from_llm_response():
 
     assert llm_used is True
     assert proposals[0]["action_type"] == "stop_instance"
+
+
+def test_unattached_ebs_finding_builds_delete_volume_proposal():
+    observation = {
+        "account_id": "123456789012",
+        "resources": [
+            {
+                "resource_id": "vol-123",
+                "resource_type": "ebs_volume",
+                "region": "ap-south-1",
+                "environment": "dev",
+                "monthly_cost_usd": 8.0,
+                "tags": {"Owner": "finops"},
+            }
+        ],
+    }
+    findings = [
+        {
+            "rule_id": "ebs.unattached.v1",
+            "resource_id": "vol-123",
+            "confidence": 0.95,
+            "evidence": {"unattached_hours": 48},
+        }
+    ]
+
+    proposals = build_proposals(observation, findings)
+
+    assert len(proposals) == 1
+    proposal = proposals[0]
+    assert proposal["action_type"] == "delete_volume"
+    assert proposal["template_id"] == "ebs.delete.v1"
+    assert proposal["resource_arn"] == "arn:aws:ec2:ap-south-1:123456789012:volume/vol-123"
+    assert proposal["parameters"] == {"volume_id": "vol-123", "region": "ap-south-1"}
+    assert proposal["rollback_plan"]["manual_action_required"] is True

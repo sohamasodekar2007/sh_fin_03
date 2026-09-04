@@ -312,7 +312,10 @@ export function SankeyFlow({ records, stateKey, active, height = 460 }: Props) {
                       className="pointer-events-none"
                       style={{
                         opacity: !dimmed ? (restingDash ? 0.28 : 0) : lit ? 0.95 : 0,
-                        animation: `flow ${lit ? 1.6 : 4.2}s linear infinite`,
+                        animationName: "flow",
+                        animationDuration: `${lit ? 1.6 : 4.2}s`,
+                        animationTimingFunction: "linear",
+                        animationIterationCount: "infinite",
                         animationPlayState: lit || restingDash ? "running" : "paused",
                         transition: "opacity 420ms ease-out",
                       }}

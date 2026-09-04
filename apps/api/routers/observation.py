@@ -41,6 +41,43 @@ def _dashboard_environment(raw: Any) -> str:
     return "dev"
 
 
+def _cost_by_resource_id(focus_dataset: FocusDataset | None) -> dict[str, float]:
+    """Sums FOCUS BilledCost per ResourceId across a dataset's records —
+    the real per-resource cost the Resources page joins against. A
+    resource with no matching entry has no observed cost this period; the
+    caller must treat a missing key as None, never as 0.0 or a guess."""
+    cost_by_resource: dict[str, float] = {}
+    if focus_dataset is None:
+        return cost_by_resource
+    for record in focus_dataset.records:
+        if record.ResourceId:
+            cost_by_resource[record.ResourceId] = cost_by_resource.get(
+                record.ResourceId, 0.0
+            ) + float(record.BilledCost)
+    return cost_by_resource
+
+
+def _focus_rows_by_resource_id(focus_dataset: FocusDataset | None) -> dict[str, int]:
+    rows_by_resource: dict[str, int] = {}
+    if focus_dataset is None:
+        return rows_by_resource
+    for record in focus_dataset.records:
+        if record.ResourceId:
+            rows_by_resource[record.ResourceId] = rows_by_resource.get(record.ResourceId, 0) + 1
+    return rows_by_resource
+
+
+def _resource_cost_source(focus_dataset: FocusDataset | None, has_cost_row: bool) -> str:
+    if not focus_dataset or not has_cost_row:
+        return "no_focus_row"
+    return {
+        "live_export": "focus_live_export",
+        "synthesized": "focus_synthesized",
+        "sample": "focus_sample",
+        "modelled": "focus_modelled",
+    }.get(focus_dataset.source, "no_focus_row")
+
+
 def _dashboard_status(resource: dict[str, Any], cpu_p95: float) -> str:
     pattern = str(resource.get("tags", {}).get("Pattern", "")).lower()
     if pattern == "idle" or cpu_p95 < 5:
@@ -419,43 +456,10 @@ async def trigger_monitor_agent(
         except Exception as err:
             print(f"[Monitor Agent] DB save warning: {err}")
 
-        # 3. Also update MongoDB `resources` for standard queries
-        try:
-            if snapshot.resources:
-                cpu_by_instance = {
-                    metric.instance_id: float(metric.average_cpu_percent or 0.0)
-                    for metric in snapshot.cpu_metrics
-                }
-                formatted_resources = []
-                for r in snapshot.resources:
-                    resource_id = r.get("resource_id") or r.get("instance_id")
-                    cpu_p95 = cpu_by_instance.get(resource_id, 0.0)
-                    formatted_resources.append({
-                        "id": resource_id,
-                        "type": r.get("instance_type", "ec2"),
-                        "cpu_p95": cpu_p95,
-                        "status": _dashboard_status(r, cpu_p95),
-                        "monthly_cost_usd": r.get("daily_cost_usd", 10.0) * 30,
-                        "tenant_id": tenant_id,
-                        "environment": _dashboard_environment(r.get("environment")),
-                        "tags": r.get("tags", {}),
-                    })
-                await db.resources.delete_many({"tenant_id": tenant_id, "provider": provider})
-                for doc in formatted_resources:
-                    doc["provider"] = provider
-                await db.resources.insert_many(formatted_resources)
-        except Exception as err:
-            print(f"[Monitor Agent] Resource sync warning: {err}")
-
-        # 3b. Persist Azure telemetry directly to `resource_metrics` (Azure
-        # only — AWS's cpu_metrics still lives embedded on the snapshot).
-        if metrics:
-            try:
-                await save_resource_metrics(db, metrics)
-            except Exception as err:
-                print(f"[Monitor Agent] Resource metrics save warning: {err}")
-
-        # 4. Normalize into FOCUS 1.0 and persist the dataset
+        # 3. Normalize into FOCUS 1.0 and persist the dataset — moved ahead
+        # of the resources-collection sync below so that step can join each
+        # resource to its real FOCUS BilledCost instead of a fabricated
+        # flat guess.
         focus_dataset_id: str | None = None
         focus_row_count = 0
         focus_source_label = "sample"
@@ -472,6 +476,7 @@ async def trigger_monitor_agent(
                     aws_access_key_id=settings.aws_access_key_id,
                     aws_secret_access_key=settings.aws_secret_access_key,
                     aws_region=settings.aws_region,
+                    focus_version=settings.focus_version,
                 )
             focus_dataset_id = await focus_repository.save_dataset(db, focus_dataset)
             focus_row_count = focus_dataset.row_count
@@ -481,6 +486,67 @@ async def trigger_monitor_agent(
             focus_source_label = focus_dataset.source if provider == "vps" else _focus_source_label(focus_dataset.source)
         except Exception as err:
             print(f"[Monitor Agent] FOCUS normalization warning: {err}")
+
+        # 4. Also update MongoDB `resources` for standard queries (the
+        # dashboard's Resources page). Cost is real, joined from the FOCUS
+        # dataset just built above — None (never a fabricated number) when
+        # a resource genuinely has no billed cost yet.
+        try:
+            if snapshot.resources:
+                cpu_by_instance = {
+                    metric.instance_id: float(metric.average_cpu_percent or 0.0)
+                    for metric in snapshot.cpu_metrics
+                }
+                cost_by_resource = _cost_by_resource_id(focus_dataset)
+                rows_by_resource = _focus_rows_by_resource_id(focus_dataset)
+
+                formatted_resources = []
+                for r in snapshot.resources:
+                    resource_id = r.get("resource_id") or r.get("instance_id")
+                    cpu_p95 = cpu_by_instance.get(resource_id, 0.0)
+                    has_cost_row = resource_id in cost_by_resource
+                    real_cost = cost_by_resource.get(resource_id)
+                    formatted_resources.append({
+                        "id": resource_id,
+                        "type": r.get("instance_type", "ec2"),
+                        "resource_type": r.get("resource_type"),
+                        "state": r.get("state"),
+                        "cpu_p95": cpu_p95,
+                        "status": _dashboard_status(r, cpu_p95),
+                        "monthly_cost_usd": real_cost,
+                        "cost_source": _resource_cost_source(focus_dataset, has_cost_row),
+                        "focus_dataset_id": focus_dataset_id,
+                        "focus_version": focus_dataset.focus_version if focus_dataset else settings.focus_version,
+                        "focus_source": focus_dataset.source if focus_dataset else None,
+                        "focus_row_count": rows_by_resource.get(resource_id, 0),
+                        "tenant_id": tenant_id,
+                        "environment": _dashboard_environment(r.get("environment")),
+                        "tags": r.get("tags", {}),
+                    })
+                resource_ids = [doc["id"] for doc in formatted_resources if doc.get("id")]
+                # Clears every doc this provider previously owned (handles a
+                # decommissioned resource dropping out) PLUS any doc sharing
+                # one of these ids regardless of its stored provider — some
+                # resources.py documents predate the `provider` field and
+                # sit there as `provider: null` forever otherwise, since an
+                # exact {"provider": provider} match never touches them.
+                await db.resources.delete_many({
+                    "tenant_id": tenant_id,
+                    "$or": [{"provider": provider}, {"id": {"$in": resource_ids}}],
+                })
+                for doc in formatted_resources:
+                    doc["provider"] = provider
+                await db.resources.insert_many(formatted_resources)
+        except Exception as err:
+            print(f"[Monitor Agent] Resource sync warning: {err}")
+
+        # 4b. Persist Azure telemetry directly to `resource_metrics` (Azure
+        # only — AWS's cpu_metrics still lives embedded on the snapshot).
+        if metrics:
+            try:
+                await save_resource_metrics(db, metrics)
+            except Exception as err:
+                print(f"[Monitor Agent] Resource metrics save warning: {err}")
 
         # 5. Resurface proposals the user rejected more than an hour ago,
         #    for resources still present in this snapshot.
@@ -514,6 +580,7 @@ async def trigger_monitor_agent(
             "region": region,
             "observation": snapshot_data,
             "focus_dataset_id": focus_dataset_id,
+            "focus_version": focus_dataset.focus_version if focus_dataset else settings.focus_version,
             "row_count": focus_row_count,
             "resource_count": snapshot.resource_count,
             "source": focus_source_label,
@@ -522,26 +589,29 @@ async def trigger_monitor_agent(
         }
 
         finished_at = datetime.now(timezone.utc)
-        await log_agent_run(
-            tenant_id=tenant_id,
-            run_id=run_id,
-            agent="Monitor",
-            status="success",
-            started_at=started_at,
-            finished_at=finished_at,
-            input_summary={"provider": provider, "account_id": account_id, "region": region},
-            output_summary={
-                "message": (
-                    f"[{provider}] Collected {summary['total_resources']} resources, "
-                    f"{focus_row_count} FOCUS rows ({focus_source_label})"
-                ),
-                **summary,
-                "focus_dataset_id": focus_dataset_id,
-                "source": focus_source_label,
-            },
-            payload=response,
-            error=None,
-        )
+        try:
+            await log_agent_run(
+                tenant_id=tenant_id,
+                run_id=run_id,
+                agent="Monitor",
+                status="success",
+                started_at=started_at,
+                finished_at=finished_at,
+                input_summary={"provider": provider, "account_id": account_id, "region": region},
+                output_summary={
+                    "message": (
+                        f"[{provider}] Collected {summary['total_resources']} resources, "
+                        f"{focus_row_count} FOCUS rows ({focus_source_label})"
+                    ),
+                    **summary,
+                    "focus_dataset_id": focus_dataset_id,
+                    "source": focus_source_label,
+                },
+                payload=response,
+                error=None,
+            )
+        except Exception as err:
+            print(f"[Monitor Agent] agent_log warning: {err}")
 
         return response
 

@@ -56,6 +56,47 @@ async def trigger_decision_agent(
 
         proposals = build_proposals(obs_doc, findings)
 
+        # Phase 15 superseded Phase 14's original design here: ASG
+        # membership / load-balancer targeting / termination protection
+        # used to be checked live, right here, filtering out unsafe stop
+        # proposals AFTER build_proposals() already created them. That's
+        # now decided once, deterministically, INSIDE build_proposals()
+        # itself, from dependency_context attached at collection time
+        # (services/collector/ec2_collector.py) — an ASG-managed or
+        # termination-protected instance never gets a stop_instance
+        # proposal built in the first place (see build_proposals()'s
+        # dependency-context branch), so there's nothing left to filter
+        # out here. What's left is EBS-cost-split / EIP-note evidence
+        # enrichment for stop_instance proposals — unrelated to that
+        # decision, still adds real value. Guarded so a missing package
+        # (folder deleted) or the flag being off just means no extra
+        # evidence gets appended, never a crash.
+        if settings.ec2_safety_checks_enabled:
+            try:
+                from packages.aws.session import AWSClientFactory
+                from services.phase14.ec2_safety import attached_ebs_monthly_cost, attached_elastic_ip_note
+
+                factory = AWSClientFactory(settings)
+                ec2_client = factory.client("ec2", region_name=region)
+
+                for p in proposals:
+                    if p.get("action_type") != "stop_instance":
+                        continue
+                    instance_id = (p.get("parameters") or {}).get("instance_id")
+                    if not instance_id:
+                        continue
+                    ebs_cost = attached_ebs_monthly_cost(ec2_client, instance_id, cost_by_resource={})
+                    eip_note = attached_elastic_ip_note(ec2_client, instance_id)
+                    extra = []
+                    if ebs_cost is not None:
+                        extra.append(f"Attached EBS volumes cost an additional ${ebs_cost:.2f}/mo.")
+                    if eip_note:
+                        extra.append(eip_note)
+                    if extra:
+                        p["rationale"] = p.get("rationale", "") + " " + " ".join(extra)
+            except Exception as err:
+                print(f"[Decision Agent] Phase 14/15 EC2 evidence enrichment warning: {err}")
+
         # Every trigger (manual, or the hourly scheduler) re-runs Analyzer
         # against the same still-idle resource and rebuilds the same
         # proposal from scratch — without this check, a resource nobody has
@@ -81,6 +122,7 @@ async def trigger_decision_agent(
                 focus_context[rid] = {
                     "resource_name": r.get("resource_name") or r.get("name") or rid,
                     "tags": r.get("tags") or {},
+                    "dependency_context": r.get("dependency_context") or {},
                 }
 
         llm_used = False

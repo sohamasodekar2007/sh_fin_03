@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from packages.schemas.schemas import CloudCareState, CloudAccount
 from apps.api.routers.auth import get_current_user
@@ -12,6 +13,19 @@ import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
 router = APIRouter(prefix="/v1", tags=["accounts-runs"])
+
+
+class ConnectedAccountSummary(BaseModel):
+    """Deliberately NOT the full CloudAccount model — that carries
+    azure_client_secret and gcp_service_account_json, real credentials that
+    must never round-trip back to the frontend. Only non-secret identifiers
+    here."""
+
+    provider: str
+    account_id: str
+    region: str = "ap-south-1"
+    connected: bool = False
+    status: str = "pending"
 
 
 async def _persist_connection_status(
@@ -35,6 +49,23 @@ async def _persist_connection_status(
         )
     except Exception as err:
         print(f"[cloud-accounts] DB save warning: {err}")
+
+
+@router.get("/cloud-accounts", response_model=list[ConnectedAccountSummary])
+async def list_cloud_accounts(
+    current_user: dict = Depends(get_current_user),
+) -> list[ConnectedAccountSummary]:
+    """Every cloud account this tenant has attempted to connect (validated
+    or not) — the "Connected providers" view. Projects only the safe fields
+    out of db.cloud_accounts; see ConnectedAccountSummary's docstring for
+    why the full CloudAccount model is never returned here."""
+    tenant_id = current_user.get("tenant_id", "demo-tenant")
+    db = get_db()
+    docs = await db.cloud_accounts.find(
+        {"tenant_id": tenant_id},
+        {"_id": 0, "provider": 1, "account_id": 1, "region": 1, "connected": 1, "status": 1},
+    ).to_list(length=None)
+    return [ConnectedAccountSummary(**doc) for doc in docs]
 
 
 @router.post("/cloud-accounts/validate")

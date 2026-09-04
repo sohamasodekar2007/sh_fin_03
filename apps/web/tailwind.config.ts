@@ -20,6 +20,7 @@ const config: Config = {
         brandBlueDeep: "#1D4A6B",
         brandTeal: "#3FA796",
         brandAmber: "#E2A93B",
+        brandDanger: "#C0533E",
       },
       fontFamily: {
         display: ["Space Grotesk", "sans-serif"],

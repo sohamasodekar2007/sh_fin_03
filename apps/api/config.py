@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     aws_write_role_arn: str = ""
 
     # Real FOCUS 1.0 Data Export (optional — synthesis from CloudSnapshot is the fallback)
+    focus_version: str = "1.2"
     focus_export_s3_bucket: str = ""
     focus_export_s3_prefix: str = ""
 
@@ -131,6 +132,16 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_interval_minutes: int = 60
 
+    # Phase 14 — Multi-Service Awareness (services/phase14/). One flag per
+    # concern, matching the existing scheduler_enabled/execution_enabled
+    # style rather than a single umbrella flag — each section degrades
+    # independently. Setting all four to False (or deleting
+    # services/phase14/ entirely) fully reverts to pre-Phase-14 behavior.
+    ec2_safety_checks_enabled: bool = True
+    rds_advisor_enabled: bool = True
+    s3_lifecycle_advisor_enabled: bool = True
+    iam_security_findings_enabled: bool = True
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -141,5 +152,7 @@ def get_settings() -> Settings:
     # NOTE: cached for the process lifetime — uvicorn --reload only watches
     # .py files, so a .env-only edit is NOT picked up until the worker
     # actually restarts. Touch any watched source file (or fully restart
-    # the process) after changing .env.
+    # (touched again: Phase 14 multi-service awareness package added)
+    # the process) after changing .env. (touched again: combined
+    # AWS-collector + cost-provenance changes settled)
     return Settings()

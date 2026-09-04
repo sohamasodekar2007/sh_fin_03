@@ -1,0 +1,161 @@
+import Link from "next/link";
+import { ArrowRight, CheckCircle2, CircleDollarSign, ShieldCheck } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { MarketingPage, solutionLinks } from "@/components/marketing/landing-pages";
+
+export function MarketingNav() {
+  return (
+    <header className="stage flex items-center justify-between py-5">
+      <Link href="/" className="flex items-center gap-2.5 font-display text-lg font-bold text-foreground">
+        <span className="inline-block h-2 w-2 rounded-full bg-signal" />
+        CloudCare
+      </Link>
+      <nav className="hidden items-center gap-5 lg:flex">
+        {solutionLinks.slice(0, 5).map((link) => (
+          <Link key={link.href} href={link.href} className="text-[11.5px] font-medium text-ink-faint hover:text-foreground">
+            {link.label}
+          </Link>
+        ))}
+      </nav>
+      <div className="flex items-center gap-2">
+        <Button asChild variant="ghost" size="sm">
+          <Link href="/login">Sign in</Link>
+        </Button>
+        <Button asChild size="sm">
+          <Link href="/onboarding">Get started</Link>
+        </Button>
+      </div>
+    </header>
+  );
+}
+
+export function MarketingFooter() {
+  return (
+    <footer className="stage mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 py-6">
+      <p className="num text-[10.5px] tracking-[0.04em] text-ink-faint">CloudCare - multi-cloud FinOps</p>
+      <div className="flex flex-wrap items-center gap-4">
+        {solutionLinks.map((link) => (
+          <Link key={link.href} href={link.href} className="text-[11.5px] font-medium text-ink-faint hover:text-foreground">
+            {link.label}
+          </Link>
+        ))}
+      </div>
+    </footer>
+  );
+}
+
+export default function SolutionPage({ page }: { page: MarketingPage }) {
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8">
+        <MarketingNav />
+        <main>
+          <section className="grid gap-7 py-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center lg:py-16">
+            <div className="stage" style={{ animationDelay: "80ms" }}>
+              <div className="eyebrow flex items-center gap-2">
+                <CircleDollarSign className="size-3.5" />
+                {page.eyebrow}
+              </div>
+              <h1 className="mt-5 max-w-3xl text-[clamp(2.35rem,5.7vw,5rem)] font-bold leading-[0.98] text-foreground">
+                {page.title}
+              </h1>
+              <p className="mt-6 max-w-2xl text-base font-semibold leading-7 text-signal">{page.accent}</p>
+              <p className="mt-4 max-w-2xl text-[13.5px] leading-relaxed text-ink-faint">{page.summary}</p>
+              <div className="mt-7 flex flex-wrap gap-3">
+                <Button asChild size="lg">
+                  <Link href="/onboarding">
+                    Launch CloudCare <ArrowRight className="size-4" />
+                  </Link>
+                </Button>
+                <Button asChild variant="outline" size="lg">
+                  <Link href="/cloudcare-vs-aws-billing">Compare with AWS Billing</Link>
+                </Button>
+              </div>
+            </div>
+
+            <div className="stage panel p-4" style={{ animationDelay: "180ms" }}>
+              <div className="rounded-lg border border-border bg-foreground p-5 text-background">
+                <div className="flex items-start justify-between gap-4 border-b border-background/15 pb-4">
+                  <div>
+                    <p className="eyebrow text-background/60">Optimization command</p>
+                    <p className="num mt-3 text-5xl font-bold">{page.metric}</p>
+                    <p className="mt-1 text-[12px] text-background/70">{page.metricLabel}</p>
+                  </div>
+                  <span className="flex h-12 w-12 items-center justify-center rounded-md bg-background/10 text-mint">
+                    <ShieldCheck className="size-6" />
+                  </span>
+                </div>
+                <div className="mt-4 grid gap-2">
+                  {page.rows.map((row) => (
+                    <div key={row.label} className="flex items-center justify-between rounded-md border border-background/15 bg-background/5 px-3 py-2.5">
+                      <span className="text-[12px] text-background/75">{row.label}</span>
+                      <span className="num text-[12px] font-semibold">{row.value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                {page.proof.map((item) => (
+                  <div key={item.label} className="rounded-md border border-border bg-surface-raised p-3">
+                    <p className="eyebrow">{item.label}</p>
+                    <p className="mt-2 text-[12px] font-semibold text-foreground">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="grid gap-4 py-6 md:grid-cols-3">
+            {page.pillars.map((pillar, index) => {
+              const Icon = pillar.icon;
+              return (
+                <article key={pillar.title} className="stage panel p-5" style={{ animationDelay: `${260 + index * 70}ms` }}>
+                  <span className="flex h-10 w-10 items-center justify-center rounded-md bg-accent text-signal">
+                    <Icon className="size-4.5" />
+                  </span>
+                  <h2 className="mt-5 text-xl font-semibold leading-tight text-foreground">{pillar.title}</h2>
+                  <p className="mt-3 text-[12.5px] leading-relaxed text-ink-faint">{pillar.body}</p>
+                </article>
+              );
+            })}
+          </section>
+
+          <section className="grid gap-5 py-8 lg:grid-cols-[0.9fr_1.1fr]">
+            <div className="panel p-6">
+              <div className="eyebrow">Operating flow</div>
+              <h2 className="mt-3 text-3xl font-bold leading-tight text-foreground">
+                From signal to action without losing control.
+              </h2>
+              <p className="mt-4 text-[13px] leading-relaxed text-ink-faint">
+                CloudCare collects evidence, applies policy, routes approvals, and keeps the action trail visible.
+              </p>
+            </div>
+            <div className="grid gap-2">
+              {page.workflow.map((step, index) => (
+                <div key={step} className="flex items-center gap-3 rounded-lg border border-border bg-surface p-3.5">
+                  <span className="num flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-foreground text-[12px] text-background">
+                    {index + 1}
+                  </span>
+                  <span className="text-sm font-semibold text-foreground">{step}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="py-8">
+            <div className="grid gap-3 md:grid-cols-3">
+              {page.outcomes.map((outcome) => (
+                <div key={outcome} className="flex gap-3 rounded-lg border border-border bg-surface p-4">
+                  <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-mint" />
+                  <p className="text-[13px] font-medium leading-6 text-foreground">{outcome}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        </main>
+        <MarketingFooter />
+      </div>
+    </div>
+  );
+}
