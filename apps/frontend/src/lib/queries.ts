@@ -3,9 +3,11 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
+import { awsFocusSampleAnalysis } from "@/lib/aws-focus-sample";
 import { addonApi } from "@/lib/finops-api";
 import type {
   AgentActivityEntry,
+  ChatMcpSetupResponse,
   ConnectedAccount,
   CostSummary,
   ForecastPoint,
@@ -93,10 +95,13 @@ export function useResources(
   });
 }
 
-export function useResourceDetail(resourceId: string | null) {
+export function useResourceDetail(resourceId: string | null, resourceType?: string | null) {
+  const params = new URLSearchParams();
+  if (resourceType) params.set("resource_type", resourceType);
+  const qs = params.toString();
   return useQuery({
-    queryKey: ["resource-detail", resourceId],
-    queryFn: () => api.get<ResourceDetail>(`/v1/resources/${encodeURIComponent(resourceId as string)}`),
+    queryKey: ["resource-detail", resourceId, resourceType ?? null],
+    queryFn: () => api.get<ResourceDetail>(`/v1/resources/${encodeURIComponent(resourceId as string)}${qs ? `?${qs}` : ""}`),
     enabled: resourceId != null,
     // 30s while the detail sheet is open — the same 15-min collector cycle
     // backs it, but a shorter poll here means a resource that just got a
@@ -114,19 +119,41 @@ export function useCloudAccounts() {
   });
 }
 
-export function useIamGovernance() {
+export function useChatMcpSetup() {
   return useQuery({
-    queryKey: ["iam-governance"],
-    queryFn: () => api.get<IAMGovernanceOverview>("/v1/governance/iam-overview"),
+    queryKey: ["chat-mcp-setup"],
+    queryFn: () => api.get<ChatMcpSetupResponse>("/v1/chat/mcp/setup"),
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: true,
   });
 }
 
-export function useParquetAnalysis() {
+export function useIamGovernance(options: { refetchInterval?: number | false } = {}) {
+  return useQuery({
+    queryKey: ["iam-governance"],
+    queryFn: () => api.get<IAMGovernanceOverview>("/v1/governance/iam-overview"),
+    refetchInterval: options.refetchInterval ?? 30_000,
+    refetchIntervalInBackground: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+  });
+}
+
+export function useParquetAnalysis(options: { source?: "s3" | "local" } = {}) {
   const params = new URLSearchParams();
   params.set("sample_limit", "50");
+  if (options.source) params.set("source", options.source);
   return useQuery({
-    queryKey: ["parquet-analysis", "s3-latest"],
-    queryFn: () => api.get<ParquetAnalysis>(`/v1/parquet-analysis?${params.toString()}`),
+    queryKey: ["parquet-analysis", options.source ?? "s3-latest"],
+    queryFn: async () => {
+      try {
+        return await api.get<ParquetAnalysis>(`/v1/parquet-analysis?${params.toString()}`);
+      } catch (error) {
+        if (options.source === "local") return awsFocusSampleAnalysis();
+        throw error;
+      }
+    },
     refetchInterval: 60_000,
   });
 }

@@ -40,7 +40,7 @@ export default function CloudCareAIPage() {
   const proposals = proposalsQuery.data ?? [];
   const accounts = accountsQuery.data ?? [];
   const latestActivity = activityQuery.data ?? [];
-  const connectedAccounts = accounts.filter((account) => account.connected).length;
+  const connectedAccounts = accounts.filter((account) => account.connected && account.provider === "aws").length;
   const pendingApprovals = pendingApprovalsCount(proposals);
   const projectedSavings = projectedMonthlySavings(proposals);
 
@@ -48,12 +48,12 @@ export default function CloudCareAIPage() {
     <div className="mx-auto w-full max-w-[1560px]">
       <div className="stage flex flex-wrap items-end justify-between gap-4 py-1">
         <div>
-          <div className="eyebrow">Agentic FinOps copilot</div>
+          <div className="eyebrow">AWS-only FinOps copilot</div>
           <h1 className="mt-1 text-[clamp(1.5rem,2.8vw,2.25rem)] font-bold leading-[1.02] text-foreground">
             CloudCareAI
           </h1>
           <p className="mt-1.5 max-w-3xl text-[12.5px] leading-relaxed text-ink-faint">
-            One conversational control plane for spend, risk, approvals, agent runs, and workload design.
+            One AWS-only conversational control plane for spend, risk, approvals, agent runs, and workload design.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -64,7 +64,7 @@ export default function CloudCareAIPage() {
             <ShieldCheck className="mr-1 size-3.5" /> Human gated
           </Badge>
           <Badge variant="outline">
-            <Cloud className="mr-1 size-3.5" /> Multi-cloud
+            <Cloud className="mr-1 size-3.5" /> AWS only
           </Badge>
         </div>
       </div>
@@ -82,7 +82,7 @@ export default function CloudCareAIPage() {
             <MetricTile label="30d spend" value={compactCurrency(costSummaryQuery.data?.total_cost_usd)} icon={DollarSign} />
             <MetricTile label="Projected savings" value={compactCurrency(projectedSavings)} icon={CheckCircle2} />
             <MetricTile label="Pending approvals" value={pendingApprovals.toLocaleString()} icon={ShieldCheck} />
-            <MetricTile label="Connected accounts" value={connectedAccounts.toLocaleString()} icon={Cloud} />
+            <MetricTile label="Connected AWS accounts" value={connectedAccounts.toLocaleString()} icon={Cloud} />
           </>
         )}
       </div>
@@ -122,7 +122,7 @@ export default function CloudCareAIPage() {
           <Panel title="Decision posture" bodyClassName="px-5 pb-5 sm:px-6 sm:pb-6">
             <div className="space-y-3 text-[12.5px]">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-ink-faint">Cloud action authority</span>
+                <span className="text-ink-faint">AWS action authority</span>
                 <Badge variant="outline">Human approval</Badge>
               </div>
               <div className="flex items-center justify-between gap-3">

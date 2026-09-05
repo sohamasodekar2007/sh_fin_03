@@ -15,6 +15,7 @@ from apps.api.routers import (
     analysis,
     auth,
     chat,
+    chat_mcp,
     decision,
     execution,
     external_factors,
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
         await ensure_live_audit_indexes(db)
         await ensure_execution_queue_indexes(db)
         await ensure_chat_indexes(db)
+        await chat_mcp.ensure_chat_mcp_indexes(db)
         await auth.ensure_auth_indexes(db)
         await agent_command.ensure_agent_command_indexes(db)
     except Exception as exc:  # noqa: BLE001 - index setup must never block startup
@@ -128,6 +130,7 @@ app.add_middleware(CorsSafeErrorMiddleware)
 app.include_router(auth.router)
 app.include_router(observation.router)
 app.include_router(parquet_analysis.router)
+app.include_router(chat_mcp.router)
 app.include_router(analysis.router)
 app.include_router(decision.router)
 app.include_router(resources.router)

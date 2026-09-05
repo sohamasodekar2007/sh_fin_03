@@ -15,13 +15,14 @@ import {
   buildCostWaterfall,
   costDeltaPct,
   costFlowFromProposals,
+  costFlowFromResources,
   deriveProvider,
   pendingApprovalsCount,
   projectedMonthlySavings,
   type Provider,
 } from "@/lib/cloudcare-data";
 import { useStage } from "@/lib/motion";
-import { useCostSummary, useForecasts, useProposals } from "@/lib/queries";
+import { useCostSummary, useForecasts, useProposals, useResources } from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
 
 /**
@@ -45,13 +46,39 @@ export default function DashboardOverviewPage() {
   const proposalsQuery = useProposals();
   const costSummaryQuery = useCostSummary(periodDays);
   const forecastsQuery = useForecasts();
+  const resourcesQuery = useResources(undefined, { refetchInterval: 30_000 });
 
   const allProposals = useMemo(() => proposalsQuery.data ?? [], [proposalsQuery.data]);
-  const providers = useMemo(() => Array.from(new Set(allProposals.map((p) => deriveProvider(p.resource_arn)))), [allProposals]);
+  const liveResources = useMemo(() => resourcesQuery.data ?? [], [resourcesQuery.data]);
+  const liveResourceProviders = useMemo(
+    () => Array.from(new Set(liveResources.map((resource) => (resource.provider || "aws") as Provider))),
+    [liveResources],
+  );
+  const providers = useMemo(() => {
+    const values = new Set<Provider>([
+      ...allProposals.map((p) => deriveProvider(p.resource_arn)),
+      ...liveResourceProviders,
+    ]);
+    return Array.from(values);
+  }, [allProposals, liveResourceProviders]);
   const proposals = useMemo(
     () => (providerFilter === "all" ? allProposals : allProposals.filter((p) => deriveProvider(p.resource_arn) === providerFilter)),
     [allProposals, providerFilter],
   );
+  const resources = useMemo(
+    () =>
+      providerFilter === "all"
+        ? liveResources
+        : liveResources.filter((resource) => (resource.provider || "aws").toLowerCase() === providerFilter),
+    [liveResources, providerFilter],
+  );
+  const liveResourceSpend = useMemo(
+    () => resources.reduce((sum, resource) => sum + (Number(resource.monthly_cost_usd) || 0), 0),
+    [resources],
+  );
+  const currentMonthlySpend =
+    liveResourceSpend > 0 ? liveResourceSpend : costSummaryQuery.data?.total_cost_usd ?? null;
+  const resourceCount = resources.length || costSummaryQuery.data?.resource_count || null;
 
   const heroOn = useStage(260);
   const forecastOn = useStage(480);
@@ -60,11 +87,11 @@ export default function DashboardOverviewPage() {
   const kpis: Kpi[] = [
     {
       label: "Current monthly spend",
-      value: costSummaryQuery.data?.total_cost_usd ?? null,
+      value: currentMonthlySpend,
       fmt: "usdCompact",
       delta: costDeltaPct(costSummaryQuery.data),
       deltaLabel: `vs prior ${periodDays}d`,
-      hint: `Sum of FOCUS BilledCost across every connected account's most recent ingest, trailing ${periodDays} days.`,
+      hint: `Live resource monthly_cost_usd from /v1/resources first; falls back to FOCUS BilledCost summary for trailing ${periodDays} days.`,
     },
     {
       label: "Projected monthly savings",
@@ -77,11 +104,11 @@ export default function DashboardOverviewPage() {
     },
     {
       label: "Resources monitored",
-      value: costSummaryQuery.data?.resource_count ?? null,
+      value: resourceCount,
       fmt: "count",
       delta: null,
-      deltaLabel: "distinct ResourceId",
-      hint: "Distinct FOCUS ResourceId across the tenant's latest ingested datasets.",
+      deltaLabel: "live inventory",
+      hint: "Distinct resources currently returned by /v1/resources, with FOCUS summary as fallback.",
     },
     {
       label: "Pending approvals",
@@ -95,7 +122,10 @@ export default function DashboardOverviewPage() {
   ];
 
   const waterfallSteps = useMemo(() => buildCostWaterfall(proposals), [proposals]);
-  const costFlowRecords = useMemo(() => costFlowFromProposals(proposals), [proposals]);
+  const resourceCostFlowRecords = useMemo(() => costFlowFromResources(resources), [resources]);
+  const proposalCostFlowRecords = useMemo(() => costFlowFromProposals(proposals), [proposals]);
+  const costFlowRecords = resourceCostFlowRecords.length ? resourceCostFlowRecords : proposalCostFlowRecords;
+  const flowSource = resourceCostFlowRecords.length ? "live resource pricing" : "proposal cost fallback";
   const selectedProposal = useMemo(() => allProposals.find((p) => p.proposal_id === selectedProposalId) ?? null, [allProposals, selectedProposalId]);
 
   function handleDecided() {
@@ -113,7 +143,7 @@ export default function DashboardOverviewPage() {
       </div>
 
       <div className="mt-4">
-        {proposalsQuery.isLoading && costSummaryQuery.isLoading ? (
+        {proposalsQuery.isLoading && costSummaryQuery.isLoading && resourcesQuery.isLoading ? (
           <div className="panel hairline-top grid grid-cols-2 gap-px sm:grid-cols-3 lg:grid-cols-4">
             {[0, 1, 2, 3].map((i) => (
               <Skeleton key={i} className="h-24 w-full" />
@@ -133,7 +163,7 @@ export default function DashboardOverviewPage() {
           headerClassName="px-5 pb-3 pt-4 sm:px-6 sm:pb-3 sm:pt-5"
           bodyClassName="px-2 pb-4 sm:px-4 sm:pb-6"
           empty={
-            proposalsQuery.isLoading ? undefined : costFlowRecords.length === 0 ? (
+            proposalsQuery.isLoading || resourcesQuery.isLoading ? undefined : costFlowRecords.length === 0 ? (
               <>
                 No costed proposals yet — connect an account and run the Monitor agent from{" "}
                 <Link className="underline" href="/onboarding">
@@ -144,7 +174,21 @@ export default function DashboardOverviewPage() {
             ) : undefined
           }
         >
-          {proposalsQuery.isLoading ? <PanelSkeleton height={460} /> : <SankeyFlow records={costFlowRecords} stateKey={`${providerFilter}|${proposals.length}`} active={heroOn} height={460} />}
+          {proposalsQuery.isLoading || resourcesQuery.isLoading ? (
+            <PanelSkeleton height={460} />
+          ) : (
+            <>
+              <div className="px-3 pb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-ink-faint sm:px-2">
+                Source: {flowSource} / {costFlowRecords.length} costed rows / {resources.length} resources
+              </div>
+              <SankeyFlow
+                records={costFlowRecords}
+                stateKey={`${providerFilter}|${resources.length}|${proposals.length}|${liveResourceSpend}`}
+                active={heroOn}
+                height={460}
+              />
+            </>
+          )}
         </Panel>
       </div>
 

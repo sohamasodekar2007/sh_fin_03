@@ -47,6 +47,10 @@ export interface Proposal {
   proposal_id: string;
   tenant_id: string;
   resource_arn: string;
+  resource_id?: string;
+  resource_name?: string | null;
+  resource_type?: string | null;
+  tags?: Record<string, string>;
   action_type: string;
   template_id: string;
   parameters: Record<string, unknown>;
@@ -54,6 +58,7 @@ export interface Proposal {
   risk_level: RiskLevel;
   confidence: number;
   evidence: EvidenceItem[];
+  dependency_facts?: string[];
   rollback_plan: Record<string, unknown> | null;
   requires_human_approval: boolean;
   status: ProposalStatus;
@@ -99,13 +104,116 @@ export function deriveProvider(resourceArn: string): Provider {
   return "unknown";
 }
 
-/** template_id (ec2.stop.v1, ebs.delete.v1, ...) is the only reliable
- * service signal on a proposal — there is no FOCUS ServiceName join here. */
-export function deriveServiceLabel(templateId: string): string {
+/** Mirrors services/decision/service.py's _service_for_resource_type —
+ * the real originating AWS service for a proposal's resource_type, when
+ * that field happens to be populated (real documents from the live
+ * pipeline currently leave it null — see serviceSegmentFromArn below for
+ * the signal that's actually always present). */
+const RESOURCE_TYPE_SERVICE_LABEL: Record<string, string> = {
+  ec2_instance: "EC2",
+  ebs_volume: "EBS",
+  rds_instance: "RDS",
+  dynamodb_table: "DynamoDB",
+  lambda_function: "Lambda",
+  security_group: "Security Groups",
+  vpc: "VPC",
+  s3_bucket: "S3",
+};
+
+const ARN_SERVICE_LABEL: Record<string, string> = {
+  ec2: "EC2",
+  rds: "RDS",
+  dynamodb: "DynamoDB",
+  lambda: "Lambda",
+  s3: "S3",
+};
+
+/** An ARN's own service segment (arn:aws:{service}:region:account:...) —
+ * required, always present, and it's exactly what
+ * services/decision/service.py's _service_for_resource_type itself wrote
+ * in when it built a finding's synthetic ARN. Far more reliable than
+ * resource_type, which real documents currently leave null. */
+function serviceSegmentFromArn(resourceArn: string): string | null {
+  const parts = resourceArn.split(":");
+  return parts.length > 2 ? parts[2] : null;
+}
+
+/** A synthetic "finding" ARN ends ".../finding/{rule_id}" — the original,
+ * specific rule (e.g. "rds.unencrypted.v1", "sg.open_ingress.v1") that
+ * services/decision/service.py's _RULE_TO_TEMPLATE flattened down to the
+ * one generic "aws.audit_review.v1" template_id. Recovering it from the
+ * ARN is the only way to tell 8 different audit findings apart on the
+ * dashboard instead of showing "Audit Review" 8 times. */
+function findingRuleIdFromArn(resourceArn: string): string | null {
+  const match = resourceArn.match(/\/finding\/([^/]+)$/);
+  return match ? match[1] : null;
+}
+
+/** Prefers `resourceType` when populated, then the ARN's own service
+ * segment (see serviceSegmentFromArn), then finally template_id's own
+ * prefix. template_id alone can't disambiguate: "aws.audit_review.v1" is
+ * one generic template reused for RDS, DynamoDB, Lambda, and Security
+ * Group findings alike, which is exactly why a template_id-only fallback
+ * used to render the literal string "AWS" as a "service" — duplicating
+ * the Provider node one level up in the cost-flow Sankey instead of
+ * naming a real service. That fallback here never repeats the bare
+ * provider name either, for whatever resource_arn shape it hasn't seen. */
+export function deriveServiceLabel(templateId: string, resourceArn: string, resourceType?: string | null): string {
+  if (resourceType && RESOURCE_TYPE_SERVICE_LABEL[resourceType]) {
+    return RESOURCE_TYPE_SERVICE_LABEL[resourceType];
+  }
+  const arnService = serviceSegmentFromArn(resourceArn);
+  if (arnService && ARN_SERVICE_LABEL[arnService]) {
+    return ARN_SERVICE_LABEL[arnService];
+  }
   if (templateId.startsWith("ec2.")) return "EC2";
   if (templateId.startsWith("ebs.")) return "EBS";
   const [prefix] = templateId.split(".");
-  return prefix ? prefix.toUpperCase() : "—";
+  if (!prefix || prefix.toLowerCase() === "aws") return "Other";
+  return prefix.toUpperCase();
+}
+
+/** Every specific rule_id (services/decision/service.py's
+ * _RULE_TO_TEMPLATE keys) and actionable template_id this repo currently
+ * issues maps to a human label here. Falls back to humanizing the raw
+ * id — strip the provider prefix and ".vN" suffix, title-case the rest —
+ * so an id added later still reads as words instead of a raw dotted slug. */
+const ACTION_LABEL_OVERRIDES: Record<string, string> = {
+  "ec2.stop.v1": "Stop Instance",
+  "ec2.start.v1": "Start Instance",
+  "ec2.resize.v1": "Resize Instance",
+  "ec2.schedule.v1": "Schedule Off-Hours",
+  "ebs.delete.v1": "Delete Volume",
+  "aws.audit_review.v1": "Audit Review",
+  "rds.unencrypted.v1": "Unencrypted Storage",
+  "rds.publicly_accessible.v1": "Publicly Accessible",
+  "rds.single_az.v1": "Single-AZ (No Failover)",
+  "rds.deletion_protection_disabled.v1": "Deletion Protection Disabled",
+  "dynamodb.pitr_disabled.v1": "Point-in-Time Recovery Disabled",
+  "lambda.long_timeout.v1": "Long Timeout",
+  "lambda.prod_without_vpc.v1": "Production Without VPC",
+  "sg.open_ingress.v1": "Open Ingress Rule",
+};
+
+function humanizeId(id: string): string {
+  const withoutVersion = id.replace(/\.v\d+$/i, "");
+  const segments = withoutVersion.split(".").filter(Boolean);
+  const withoutPrefix = segments.length > 1 ? segments.slice(1) : segments;
+  const words = withoutPrefix.join(" ").split(/[._-]+/).filter(Boolean);
+  if (words.length === 0) return id;
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+/** Prefers the specific rule_id recovered from a synthetic finding ARN
+ * (see findingRuleIdFromArn) over the proposal's own template_id — that
+ * field is flattened to one generic bucket for every audit-review
+ * finding, so using it directly would show "Audit Review" for 8
+ * different underlying problems. Actionable EC2/EBS proposals have no
+ * /finding/ ARN suffix, so they fall through to their own template_id
+ * unaffected. */
+export function deriveActionLabel(templateId: string, resourceArn?: string): string {
+  const effectiveId = (resourceArn && findingRuleIdFromArn(resourceArn)) || templateId;
+  return ACTION_LABEL_OVERRIDES[effectiveId] ?? humanizeId(effectiveId);
 }
 
 export function resourceIdFromArn(resourceArn: string): string {
@@ -203,6 +311,48 @@ export interface CostFlowRecord {
   BilledCost: number;
 }
 
+function environmentFromResource(value: ResourceItem["environment"] | null | undefined): Environment {
+  if (value === "prod") return "production";
+  if (value === "staging") return "staging";
+  if (value === "dev") return "development";
+  return "unknown";
+}
+
+function serviceCategoryFromResource(resource: ResourceItem): string {
+  const type = (resource.resource_type ?? resource.type ?? "").toLowerCase();
+  if (type.includes("ec2")) return "EC2";
+  if (type.includes("ebs")) return "EBS";
+  if (type.includes("rds")) return "RDS";
+  if (type.includes("dynamodb")) return "DynamoDB";
+  if (type.includes("lambda")) return "Lambda";
+  if (type.includes("security_group")) return "Security Groups";
+  if (type.includes("vpc")) return "VPC";
+  if (type.includes("s3")) return "S3";
+  return resource.resource_type?.replace(/_/g, " ") || resource.type || "Other";
+}
+
+function serviceNameFromResource(resource: ResourceItem): string {
+  if (resource.resource_type === "ec2_instance") return resource.instance_type || resource.type || "EC2 instance";
+  if (resource.resource_type === "ebs_volume") return resource.type || "EBS volume";
+  if (resource.resource_type === "rds_instance") return resource.type || "RDS instance";
+  if (resource.resource_type === "lambda_function") return resource.type || "Lambda function";
+  if (resource.resource_type === "dynamodb_table") return resource.type || "DynamoDB table";
+  if (resource.resource_type === "s3_bucket") return "Bucket";
+  return resource.type || resource.resource_type?.replace(/_/g, " ") || "Resource";
+}
+
+export function costFlowFromResources(resources: ResourceItem[]): CostFlowRecord[] {
+  return resources
+    .filter((resource) => isNum(Number(resource.monthly_cost_usd)) && Number(resource.monthly_cost_usd) > 0)
+    .map((resource) => ({
+      ProviderName: (resource.provider || "aws").toUpperCase(),
+      ServiceCategory: serviceCategoryFromResource(resource),
+      ServiceName: serviceNameFromResource(resource),
+      environment: environmentFromResource(resource.environment),
+      BilledCost: Number(resource.monthly_cost_usd),
+    }));
+}
+
 /** Built from proposals (each carries a resource, a derived provider/
  * service, an environment, and a real current-cost figure) rather than
  * raw FOCUS records — the dashboard has no bulk FOCUS-record endpoint,
@@ -215,8 +365,8 @@ export function costFlowFromProposals(proposals: Proposal[]): CostFlowRecord[] {
     .filter((p) => isNum(Number(p.cost_current_monthly)) && Number(p.cost_current_monthly) > 0)
     .map((p) => ({
       ProviderName: deriveProvider(p.resource_arn).toUpperCase(),
-      ServiceCategory: deriveServiceLabel(p.template_id),
-      ServiceName: p.template_id,
+      ServiceCategory: deriveServiceLabel(p.template_id, p.resource_arn, p.resource_type),
+      ServiceName: deriveActionLabel(p.template_id, p.resource_arn),
       environment: p.environment,
       BilledCost: Number(p.cost_current_monthly),
     }));
@@ -293,6 +443,9 @@ export interface ResourceItem {
   focus_source: string | null;
   focus_row_count: number;
   resource_type: string | null;
+  instance_type?: string | null;
+  vcpu?: number | null;
+  memory_gib?: number | null;
   provider: string | null;
   state: string | null;
   tags: Record<string, string>;
@@ -342,6 +495,9 @@ export interface ResourceDetail {
   focus_dataset_id: string | null;
   focus_row_count: number;
   related_proposals: Proposal[];
+  raw_resource: Record<string, unknown>;
+  aws_live_details: Record<string, unknown>;
+  aws_live_errors: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +590,84 @@ export interface ChatMessageResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Chatbot MCP setup - GET/POST /v1/chat/mcp/setup
+// ---------------------------------------------------------------------------
+
+export interface ChatMcpTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ChatMcpSetup {
+  tenant_id: string;
+  enabled: boolean;
+  client_name: string;
+  allowed_tools: string[];
+  instructions: string;
+  audit_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  configured_by: string | null;
+}
+
+export interface ChatMcpTokenSummary {
+  token_id: string;
+  label: string;
+  created_at: string;
+  created_by: string;
+  last_used_at: string | null;
+}
+
+export interface ChatMcpAuditEvent {
+  tenant_id: string;
+  user_id: string;
+  method: string;
+  tool_name: string | null;
+  ok: boolean;
+  error: string | null;
+  created_at: string;
+}
+
+export interface ChatMcpStatus {
+  mcp_enabled: boolean;
+  env_token_configured: boolean;
+  dashboard_tokens: number;
+  mongo_audit_events: number;
+  model_configured: boolean;
+  model: string;
+  model_base_url: string;
+  allowed_tool_count: number;
+  chatbot_only_scope: boolean;
+}
+
+export interface ChatMcpSetupResponse {
+  setup: ChatMcpSetup;
+  available_tools: ChatMcpTool[];
+  tokens: ChatMcpTokenSummary[];
+  audit: ChatMcpAuditEvent[];
+  status: ChatMcpStatus;
+  token?: string;
+  token_id?: string;
+}
+
+export interface ChatMcpCheck {
+  key: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface ChatMcpCheckResponse {
+  checked_at: string;
+  checks: ChatMcpCheck[];
+  ai_review: {
+    ready: boolean;
+    summary: string;
+    next_actions: string[];
+  } | null;
+}
+
+// ---------------------------------------------------------------------------
 // IAM & Governance — GET /v1/governance/iam-overview
 // (packages/schemas/governance.py). Account-wide identity/access structure
 // plus a CloudTrail-derived audit trail — a different shape from
@@ -505,7 +739,7 @@ export interface ParquetBreakdownItem {
 
 export interface ParquetAnalysis {
   file: {
-    source: "s3";
+    source: "s3" | "local";
     uri: string;
     bucket: string;
     key: string;
@@ -532,6 +766,9 @@ export interface ParquetAnalysis {
     by_category: ParquetBreakdownItem[];
     by_region: ParquetBreakdownItem[];
     by_charge_category: ParquetBreakdownItem[];
+    by_billing_account?: ParquetBreakdownItem[];
+    by_resource?: ParquetBreakdownItem[];
+    by_usage?: ParquetBreakdownItem[];
   };
   sample_rows: Array<Record<string, unknown>>;
   converter: {

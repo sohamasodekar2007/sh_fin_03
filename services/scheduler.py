@@ -267,7 +267,6 @@ def start_scheduler() -> AsyncIOScheduler | None:
         coalesce=True,
         max_instances=1,
         replace_existing=True,
-        next_run_time=datetime.now(timezone.utc),
     )
     _scheduler.start()
     logger.info(

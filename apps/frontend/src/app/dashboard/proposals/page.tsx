@@ -79,7 +79,7 @@ function exportProposalsCsv(proposals: Proposal[]) {
     proposal.execution_status,
     proposal.execution_mode,
     deriveProvider(proposal.resource_arn),
-    deriveServiceLabel(proposal.template_id),
+    deriveServiceLabel(proposal.template_id, proposal.resource_arn, proposal.resource_type),
     proposal.resource_arn,
     proposal.environment,
     proposal.action_type,

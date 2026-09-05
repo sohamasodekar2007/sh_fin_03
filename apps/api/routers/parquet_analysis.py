@@ -5,7 +5,8 @@ from io import BytesIO
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
@@ -18,6 +19,7 @@ from packages.aws.session import AWSClientFactory
 router = APIRouter(prefix="/v1/parquet-analysis", tags=["parquet-analysis"])
 
 COST_COLUMNS = ("BilledCost", "EffectiveCost", "ListCost", "ContractedCost")
+LOCAL_SAMPLE_PARQUET = Path(__file__).resolve().parents[3] / "Horizon-00001.snappy.parquet"
 
 
 def _load_table(raw_bytes: bytes, limit: int):
@@ -53,6 +55,18 @@ def _top(rows: list[dict[str, Any]], label_key: str, value_key: str = "BilledCos
         {"name": name, "cost_usd": round(cost, 4), "rows": counts[name]}
         for name, cost in sorted(totals.items(), key=lambda item: item[1], reverse=True)[:limit]
     ]
+
+
+def _top_first_available(
+    rows: list[dict[str, Any]],
+    label_keys: tuple[str, ...],
+    value_key: str = "BilledCost",
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    for label_key in label_keys:
+        if any(row.get(label_key) not in (None, "") for row in rows):
+            return _top(rows, label_key, value_key=value_key, limit=limit)
+    return []
 
 
 def _converter_plan(settings) -> dict[str, Any]:
@@ -137,6 +151,22 @@ def _read_s3_parquet(settings) -> tuple[dict[str, Any], bytes]:
     return source, body
 
 
+def _read_local_parquet() -> tuple[dict[str, Any], bytes]:
+    if not LOCAL_SAMPLE_PARQUET.exists():
+        raise HTTPException(status_code=404, detail=f"Local AWS FOCUS sample not found: {LOCAL_SAMPLE_PARQUET.name}")
+    stat = LOCAL_SAMPLE_PARQUET.stat()
+    return (
+        {
+            "source": "local",
+            "bucket": "",
+            "key": LOCAL_SAMPLE_PARQUET.name,
+            "size_bytes": stat.st_size,
+            "last_modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+        },
+        LOCAL_SAMPLE_PARQUET.read_bytes(),
+    )
+
+
 def build_parquet_analysis_payload(
     *,
     source: dict[str, Any],
@@ -162,11 +192,12 @@ def build_parquet_analysis_payload(
     effective = cost_totals.get("EffectiveCost", 0.0)
     list_cost = cost_totals.get("ListCost", 0.0)
 
-    source_uri = f"s3://{source['bucket']}/{source['key']}"
+    source_kind = source.get("source") or "s3"
+    source_uri = f"s3://{source['bucket']}/{source['key']}" if source_kind == "s3" else str(LOCAL_SAMPLE_PARQUET)
     return jsonable_encoder(
         {
             "file": {
-                "source": "s3",
+                "source": source_kind,
                 "uri": source_uri,
                 "bucket": source["bucket"],
                 "key": source["key"],
@@ -196,6 +227,9 @@ def build_parquet_analysis_payload(
                 "by_category": _top(rows, "ServiceCategory"),
                 "by_region": _top(rows, "RegionName"),
                 "by_charge_category": _top(rows, "ChargeCategory"),
+                "by_billing_account": _top_first_available(rows, ("SubAccountName", "SubAccountId", "BillingAccountName", "BillingAccountId")),
+                "by_resource": _top(rows, "ResourceId"),
+                "by_usage": _top_first_available(rows, ("x_UsageType", "SkuMeter", "x_Operation", "ChargeDescription")),
             },
             "sample_rows": sample_rows,
             "converter": _converter_plan(settings),
@@ -244,11 +278,12 @@ def refresh_s3_parquet_analysis(tenant_id: str = "demo-tenant", sample_limit: in
 async def inspect_parquet(
     current_user: CurrentUser,
     sample_limit: int = Query(default=50, ge=1, le=200),
+    source: Literal["s3", "local"] = Query(default="s3"),
 ) -> dict[str, Any]:
     settings = get_settings()
-    source, raw_bytes = _read_s3_parquet(settings)
+    source_info, raw_bytes = _read_local_parquet() if source == "local" else _read_s3_parquet(settings)
     return build_parquet_analysis_payload(
-        source=source,
+        source=source_info,
         raw_bytes=raw_bytes,
         sample_limit=sample_limit,
         tenant_id=current_user["tenant_id"],

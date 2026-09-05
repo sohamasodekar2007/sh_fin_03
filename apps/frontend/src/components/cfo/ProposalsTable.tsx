@@ -43,18 +43,25 @@ const STATUS_COLOR: Record<ProposalStatus, string> = {
   verified: "var(--mint)",
 };
 
-type SortKey = "cost" | "savings" | "risk" | "confidence";
+type SortKey = "created" | "cost" | "savings" | "risk" | "confidence";
 
 function formatDate(value?: string | null) {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
   return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function timestamp(value?: string | null) {
+  if (!value) return 0;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function decisionDate(proposal: Proposal) {
@@ -68,7 +75,7 @@ interface Props {
 }
 
 export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
-  const [sort, setSort] = useState<SortKey>("savings");
+  const [sort, setSort] = useState<SortKey>("created");
   const [providerFilter, setProviderFilter] = useState<string>("all");
   const [environmentFilter, setEnvironmentFilter] = useState<string>("all");
 
@@ -81,6 +88,7 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
     if (environmentFilter !== "all") r = r.filter((p) => p.environment === environmentFilter);
     const riskOrder: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
     r.sort((a, b) => {
+      if (sort === "created") return timestamp(b.created_at) - timestamp(a.created_at);
       if (sort === "cost") return (Number(b.cost_current_monthly) || 0) - (Number(a.cost_current_monthly) || 0);
       if (sort === "savings") return (Number(b.expected_monthly_savings) || 0) - (Number(a.expected_monthly_savings) || 0);
       if (sort === "risk") return (riskOrder[b.risk_level] ?? 0) - (riskOrder[a.risk_level] ?? 0);
@@ -124,6 +132,7 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
           <span className="eyebrow" aria-hidden>Sort</span>
           {(
             [
+              ["created", "Created"],
               ["savings", "Savings"],
               ["cost", "Cost"],
               ["risk", "Risk"],
@@ -156,6 +165,7 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
               <TableHead className="text-right">Monthly cost</TableHead>
               <TableHead>Finding</TableHead>
               <TableHead>Action</TableHead>
+              <TableHead>Dependency facts</TableHead>
               <TableHead>Created</TableHead>
               <TableHead>Decision</TableHead>
               <TableHead className="text-right">Savings</TableHead>
@@ -184,7 +194,7 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
                     {resourceIdFromArn(p.resource_arn)}
                   </TableCell>
                   <TableCell className="text-[11.5px] uppercase text-ink-dim">{deriveProvider(p.resource_arn)}</TableCell>
-                  <TableCell className="text-[11.5px] text-ink-dim">{deriveServiceLabel(p.template_id)}</TableCell>
+                  <TableCell className="text-[11.5px] text-ink-dim">{deriveServiceLabel(p.template_id, p.resource_arn, p.resource_type)}</TableCell>
                   <TableCell className="text-[11.5px] capitalize text-ink-dim">{p.environment}</TableCell>
                   <TableCell className="text-right">
                     <Money value={Number(p.cost_current_monthly)} compact inline className="text-[11.5px]" />
@@ -193,7 +203,12 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
                     {p.template_id}
                   </TableCell>
                   <TableCell className="text-[11.5px] capitalize text-ink-dim">{p.action_type.replace(/_/g, " ")}</TableCell>
-                  <TableCell className="num whitespace-nowrap text-[11px] text-ink-faint">{formatDate(p.created_at)}</TableCell>
+                  <TableCell className="max-w-[220px] truncate text-[11px] text-ink-faint" title={(p.dependency_facts ?? []).join(", ") || p.rationale}>
+                    {(p.dependency_facts ?? []).join(", ") || "See rationale"}
+                  </TableCell>
+                  <TableCell className="num whitespace-nowrap text-[11px] text-ink-faint" title={p.created_at ?? undefined}>
+                    {formatDate(p.created_at)}
+                  </TableCell>
                   <TableCell className="num whitespace-nowrap text-[11px] text-ink-faint">{formatDate(decisionDate(p))}</TableCell>
                   <TableCell className="text-right">
                     <Money value={Number(p.expected_monthly_savings)} compact inline className="text-[11.5px]" style={{ color: "var(--mint)" }} />
@@ -227,7 +242,7 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
             })}
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={13} className="py-8 text-center text-[12.5px] text-ink-faint">
+                <TableCell colSpan={14} className="py-8 text-center text-[12.5px] text-ink-faint">
                   No proposals match this filter.
                 </TableCell>
               </TableRow>

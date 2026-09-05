@@ -282,7 +282,9 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
     if (!ssoAccessToken) return;
     setLoading("sso-continue");
     try {
-      await api.post("/v1/auth/sso/mfa-preference", { mfa_level: "none" });
+      await api.post("/v1/auth/sso/mfa-preference", { mfa_level: "none" }, {
+        headers: { Authorization: `Bearer ${ssoAccessToken}` },
+      });
       await completeLogin(ssoAccessToken);
     } catch (err) {
       setError(isApiError(err) ? err.message : "Could not save your SSO preference.");
@@ -295,7 +297,9 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
     if (!ssoAccessToken) return;
     setLoading("sso-2fa");
     try {
-      await api.post("/v1/auth/sso/mfa-preference", { mfa_level: "2fa" });
+      await api.post("/v1/auth/sso/mfa-preference", { mfa_level: "2fa" }, {
+        headers: { Authorization: `Bearer ${ssoAccessToken}` },
+      });
       await completeLogin(ssoAccessToken);
     } catch (err) {
       setError(isApiError(err) ? err.message : "Could not enable SSO 2FA.");
@@ -314,13 +318,14 @@ function LoginPageInner({ googleEnabled, githubEnabled }: LoginFormProps) {
 
     setLoading("sso-3fa");
     try {
-      const options = await api.post<SsoRegisterOptions>("/v1/auth/webauthn/session/register/begin");
+      const authInit = { headers: { Authorization: `Bearer ${ssoAccessToken}` } };
+      const options = await api.post<SsoRegisterOptions>("/v1/auth/webauthn/session/register/begin", undefined, authInit);
       const { session_id: sessionId, ...registrationOptions } = options;
       const credential = await startRegistration(registrationOptions);
       await api.post("/v1/auth/webauthn/session/register/finish", {
         session_id: sessionId,
         registration_response: credential,
-      });
+      }, authInit);
       await completeLogin(ssoAccessToken);
     } catch (err) {
       setError(isApiError(err) ? err.message : err instanceof Error ? err.message : "Could not enable SSO 3FA.");

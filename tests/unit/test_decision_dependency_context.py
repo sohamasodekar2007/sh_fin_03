@@ -120,7 +120,8 @@ def test_load_balancer_target_does_not_lower_an_already_higher_risk():
 
 
 def test_no_dependency_context_is_unchanged_plain_stop_instance():
-    resource = _resource()
+    resource = _resource(tags={"Environment": "dev", "Team": "platform"})
+    resource["name"] = "idle-api"
     proposals = build_proposals(_observation(resource), [_idle_finding()])
 
     assert len(proposals) == 1
@@ -129,6 +130,10 @@ def test_no_dependency_context_is_unchanged_plain_stop_instance():
     assert p["template_id"] == "ec2.stop.v1"
     assert p["risk_level"] == "low"
     assert p["requires_human_approval"] is False
+    assert p["resource_id"] == "i-1"
+    assert p["resource_name"] == "idle-api"
+    assert p["resource_type"] == "ec2_instance"
+    assert p["tags"] == {"Environment": "dev", "Team": "platform"}
 
 
 # ---------------------------------------------------------------------------
@@ -161,14 +166,16 @@ def test_missing_ownership_forces_human_approval_on_delete_volume():
 # ---------------------------------------------------------------------------
 
 
-def test_max_risk_ceiling_forces_approval_without_changing_risk_level():
+def test_max_risk_ceiling_caps_risk_level_and_forces_approval():
     resource = _resource(environment="prod", tags={"cloudcare:max-risk": "low"})
     proposals = build_proposals(_observation(resource), [_idle_finding()])
 
     p = proposals[0]
-    assert p["risk_level"] == "high"  # never overwritten/lowered — the real risk stays visible
+    assert p["risk_level"] == "low"
     assert p["requires_human_approval"] is True
     assert "max-risk" in p["rationale"]
+    assert "risk_level high" in p["rationale"]
+    assert "cloudcare:max-risk=low" in p["dependency_facts"]
 
 
 def test_max_risk_ceiling_not_exceeded_has_no_effect():
@@ -178,6 +185,25 @@ def test_max_risk_ceiling_not_exceeded_has_no_effect():
     p = proposals[0]
     assert p["risk_level"] == "low"
     assert p["requires_human_approval"] is False
+
+
+def test_cloudcare_exclude_true_blocks_proposal_even_if_finding_reaches_decision():
+    resource = _resource(environment="dev", tags={"cloudcare:exclude": "true"})
+    proposals = build_proposals(_observation(resource), [_idle_finding()])
+
+    assert proposals == []
+
+
+def test_rationale_always_names_dependency_facts_considered():
+    resource = _resource()
+    proposals = build_proposals(_observation(resource), [_idle_finding()])
+
+    rationale = proposals[0]["rationale"]
+    assert "Dependency facts considered:" in rationale
+    assert "asg=none" in rationale
+    assert "load_balancer_targets=0" in rationale
+    assert "termination_protected=false" in rationale
+    assert "ownership=present_or_not_reported" in rationale
 
 
 def test_service_configuration_finding_becomes_audit_review_proposal():

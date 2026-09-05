@@ -37,6 +37,10 @@ class StopInstanceRequest(BaseModel):
     confirm: bool = False
 
 
+class InstancePowerRequest(BaseModel):
+    confirm: bool = False
+
+
 def _tags_to_dict(tags: list[dict[str, Any]] | None) -> dict[str, str]:
     return {str(tag.get("Key")): str(tag.get("Value", "")) for tag in tags or [] if tag.get("Key")}
 
@@ -476,6 +480,23 @@ async def ensure_agent_command_indexes(db: AsyncIOMotorDatabase) -> None:
     await db[_COLLECTION].create_index([("tenant_id", 1), ("run_id", 1)], unique=True, name="tenant_run_unique")
 
 
+async def _persist_run_notifications(
+    db: AsyncIOMotorDatabase,
+    tenant_id: str,
+    run_id: str,
+    notifications: dict[str, Any],
+) -> None:
+    await db[_COLLECTION].update_one(
+        {"tenant_id": tenant_id, "run_id": run_id},
+        {
+            "$set": {
+                "notifications": notifications,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+
 async def _mongo_available(db: AsyncIOMotorDatabase, timeout_seconds: float = 1.5) -> bool:
     global _MONGO_UNAVAILABLE_UNTIL
     now = time.monotonic()
@@ -783,21 +804,66 @@ async def list_ec2_instances(
 @router.post("/ec2-instances/{instance_id}/stop", response_model=dict[str, Any])
 async def stop_ec2_instance(
     instance_id: str,
-    body: StopInstanceRequest,
+    body: InstancePowerRequest,
     current_user: CurrentUser,
     region: str | None = Query(default=None),
 ) -> dict[str, Any]:
+    return await _change_ec2_instance_power(
+        instance_id=instance_id,
+        body=body,
+        current_user=current_user,
+        region=region,
+        action="stop_instance",
+        target_state="stopped",
+        boto_call="stop_instances",
+        waiter_name="instance_stopped",
+        rollback_action="start_instance",
+    )
+
+
+@router.post("/ec2-instances/{instance_id}/start", response_model=dict[str, Any])
+async def start_ec2_instance(
+    instance_id: str,
+    body: InstancePowerRequest,
+    current_user: CurrentUser,
+    region: str | None = Query(default=None),
+) -> dict[str, Any]:
+    return await _change_ec2_instance_power(
+        instance_id=instance_id,
+        body=body,
+        current_user=current_user,
+        region=region,
+        action="start_instance",
+        target_state="running",
+        boto_call="start_instances",
+        waiter_name="instance_running",
+        rollback_action="stop_instance",
+    )
+
+
+async def _change_ec2_instance_power(
+    *,
+    instance_id: str,
+    body: InstancePowerRequest,
+    current_user: CurrentUser,
+    region: str | None,
+    action: str,
+    target_state: str,
+    boto_call: str,
+    waiter_name: str,
+    rollback_action: str,
+) -> dict[str, Any]:
     if not body.confirm:
-        raise HTTPException(status_code=400, detail="Human confirmation is required before stopping an instance.")
+        raise HTTPException(status_code=400, detail=f"Human confirmation is required before {action.replace('_', ' ')}.")
 
     db = get_db()
     settings = get_settings()
     if not settings.execution_enabled:
-        raise HTTPException(status_code=400, detail="EXECUTION_ENABLED is false; refusing to stop instances.")
+        raise HTTPException(status_code=400, detail=f"EXECUTION_ENABLED is false; refusing to {action.replace('_', ' ')}.")
 
     tenant_id = current_user["tenant_id"]
     region = region or settings.aws_region
-    run_id = f"manual-stop-{uuid4()}"
+    run_id = f"manual-{action.replace('_instance', '')}-{uuid4()}"
     proposal_id = f"{run_id}:{instance_id}"
     resource_arn = f"arn:aws:ec2:{region}:{settings.aws_account_id or 'unknown'}:instance/{instance_id}"
     started_at = datetime.now(timezone.utc)
@@ -809,29 +875,29 @@ async def stop_ec2_instance(
         before_instance = before_resp["Reservations"][0]["Instances"][0]
         before = _instance_summary(before_instance)
 
-        if before["state"] == "stopped":
+        if before["state"] == target_state:
             record = LiveExecutionRecord(
-                idempotency_key=f"{proposal_id}:stop_instance",
+                idempotency_key=f"{proposal_id}:{action}",
                 proposal_id=proposal_id,
                 tenant_id=tenant_id,
                 run_id=run_id,
                 resource_arn=resource_arn,
                 resource_id=instance_id,
-                action_type="stop_instance",
+                action_type=action,
                 status="no_op",
-                reason_codes=["ALREADY_STOPPED"],
+                reason_codes=["ALREADY_IN_DESIRED_STATE"],
                 execution_mode=settings.execution_mode,
                 actual_aws_call_made=False,
                 before_state=before,
                 after_state=before,
-                rollback_descriptor={"action": "start_instance", "instance_id": instance_id, "region": region},
+                rollback_descriptor={"action": rollback_action, "instance_id": instance_id, "region": region},
             )
         else:
             actual_call_made = False
             if settings.execution_mode == "live":
-                ec2.stop_instances(InstanceIds=[instance_id])
+                getattr(ec2, boto_call)(InstanceIds=[instance_id])
                 actual_call_made = True
-                waiter = ec2.get_waiter("instance_stopped")
+                waiter = ec2.get_waiter(waiter_name)
                 waiter.wait(
                     InstanceIds=[instance_id],
                     WaiterConfig={"Delay": 3, "MaxAttempts": 20},
@@ -841,23 +907,23 @@ async def stop_ec2_instance(
             after_instance = after_resp["Reservations"][0]["Instances"][0]
             after = _instance_summary(after_instance)
             if settings.execution_mode != "live":
-                after["state"] = "stopped (simulated)"
+                after["state"] = f"{target_state} (simulated)"
 
             record = LiveExecutionRecord(
-                idempotency_key=f"{proposal_id}:stop_instance",
+                idempotency_key=f"{proposal_id}:{action}",
                 proposal_id=proposal_id,
                 tenant_id=tenant_id,
                 run_id=run_id,
                 resource_arn=resource_arn,
                 resource_id=instance_id,
-                action_type="stop_instance",
+                action_type=action,
                 status="executed",
-                reason_codes=["STOP_INSTANCE_REQUESTED"],
+                reason_codes=[f"{action.upper()}_REQUESTED"],
                 execution_mode=settings.execution_mode,
                 actual_aws_call_made=actual_call_made,
                 before_state=before,
                 after_state=after,
-                rollback_descriptor={"action": "start_instance", "instance_id": instance_id, "region": region},
+                rollback_descriptor={"action": rollback_action, "instance_id": instance_id, "region": region},
             )
 
         persistence_error: str | None = None
@@ -885,7 +951,7 @@ async def stop_ec2_instance(
     except ExecutionRefused as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Could not stop EC2 instance {instance_id}: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Could not {action.replace('_', ' ')} {instance_id}: {exc}") from exc
 
 
 async def _freshen_saved_doc(
@@ -1074,11 +1140,20 @@ async def run_agent_command(
         )
         public_doc = await _freshen_saved_doc(db, tenant_id, doc)
         _LATEST_COMMAND_CACHE[tenant_id] = public_doc
-        public_doc["notifications"] = {
+        notifications = {
             "agent_command_analysis_email": await _dispatch_agent_command_analysis_email(
                 db, background_tasks, current_user, public_doc
             )
         }
+        public_doc["notifications"] = notifications
+        try:
+            await _persist_run_notifications(db, tenant_id, run_id, notifications)
+        except Exception as exc:  # noqa: BLE001 - run was saved; keep response usable and expose the gap
+            logger.exception("agent-command: failed to persist notification receipt for %s", run_id)
+            public_doc["persistence_error"] = (
+                public_doc.get("persistence_error")
+                or f"Run was saved, but notification receipt was not persisted: {exc}"
+            )
         _LATEST_COMMAND_CACHE[tenant_id] = public_doc
         return public_doc
     except Exception as exc:  # noqa: BLE001 - Mongo persistence should not erase live AWS collection output

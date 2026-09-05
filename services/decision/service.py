@@ -25,7 +25,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError
 
-from services.governance.tags import exceeds_max_risk, RISK_ORDER
+from services.governance.tags import get_max_risk_ceiling, is_excluded, RISK_ORDER
 from services.llm.client import LLMClient, LLMUnavailable
 
 logger = logging.getLogger(__name__)
@@ -112,10 +112,18 @@ def build_proposals(observation: dict[str, Any], findings: list[dict[str, Any]])
         resource_type = resource.get("resource_type", "ec2_instance")
         tags = resource.get("tags") or {}
         dep_ctx = resource.get("dependency_context") or {}
+        if is_excluded(tags):
+            continue
 
         action_type = template["action_type"]
         template_id = template["template_id"]
         dependency_notes: list[str] = []
+        dependency_facts = [
+            f"asg={dep_ctx.get('in_autoscaling_group') or 'none'}",
+            f"load_balancer_targets={len(dep_ctx.get('load_balancer_targets') or [])}",
+            f"termination_protected={str(bool(dep_ctx.get('termination_protected'))).lower()}",
+            f"ownership={'missing' if dep_ctx.get('missing_ownership') else 'present_or_not_reported'}",
+        ]
         force_requires_approval = False
         zero_savings = False
 
@@ -167,10 +175,14 @@ def build_proposals(observation: dict[str, Any], findings: list[dict[str, Any]])
                 "No Owner or Environment tag is set on this resource — ownership is unclear."
             )
 
-        if exceeds_max_risk(risk_level, tags):
+        max_risk_ceiling = get_max_risk_ceiling(tags)
+        if max_risk_ceiling and RISK_ORDER.get(risk_level, 0) > RISK_ORDER[max_risk_ceiling]:
+            computed_risk_level = risk_level
+            risk_level = max_risk_ceiling
             force_requires_approval = True
+            dependency_facts.append(f"cloudcare:max-risk={max_risk_ceiling}")
             dependency_notes.append(
-                f"This resource's real risk_level ({risk_level}) exceeds its cloudcare:max-risk "
+                f"Decision computed risk_level {computed_risk_level}, but cloudcare:max-risk={max_risk_ceiling} caps displayed risk_level at {max_risk_ceiling}. "
                 "ceiling — held for human approval regardless of what auto-execution rules would "
                 "otherwise allow."
             )
@@ -218,7 +230,8 @@ def build_proposals(observation: dict[str, Any], findings: list[dict[str, Any]])
         rationale = (
             f"{finding['rule_id']} detected on {resource_id} ({resource_type}) "
             f"(confidence {finding.get('confidence', 0):.2f}); "
-            f"estimated savings ${expected_savings}/mo."
+            f"estimated savings ${expected_savings}/mo. "
+            f"Dependency facts considered: {', '.join(dependency_facts)}."
         )
         if dependency_notes:
             rationale += " " + " ".join(dependency_notes)
@@ -226,6 +239,10 @@ def build_proposals(observation: dict[str, Any], findings: list[dict[str, Any]])
         proposal = {
             "proposal_id": str(uuid4()),
             "resource_arn": resource_arn,
+            "resource_id": resource_id,
+            "resource_name": resource.get("resource_name") or resource.get("name") or resource_id,
+            "resource_type": resource_type,
+            "tags": tags,
             "action_type": action_type,
             "template_id": template_id,
             "parameters": parameters,
@@ -238,6 +255,7 @@ def build_proposals(observation: dict[str, Any], findings: list[dict[str, Any]])
                 if isinstance(v, (int, float))
             ],
             "rollback_plan": rollback_plan,
+            "dependency_facts": dependency_facts,
             "requires_human_approval": force_requires_approval or risk_level in ("high", "critical"),
             "status": "proposed",
             "rationale": rationale,

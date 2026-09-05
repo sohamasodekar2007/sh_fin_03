@@ -62,6 +62,9 @@ class Resource(BaseModel):
     # tell resource kinds apart by a real field instead of pattern-matching
     # the `type` string (which for EBS is a size/SKU label like "500GB-gp3").
     resource_type: str | None = None
+    instance_type: str | None = None
+    vcpu: int | None = None
+    memory_gib: float | None = None
     provider: str | None = None
     state: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)

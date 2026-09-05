@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   ListChecks,
   MessageCircle,
+  PlugZap,
   Server,
   ShieldAlert,
   ShieldCheck,
@@ -37,6 +38,7 @@ const NAV_ITEMS = [
   { href: "/dashboard/governance", label: "IAM & Governance", icon: ShieldCheck, exact: false },
   { href: "/dashboard/security-findings", label: "Security Findings", icon: ShieldAlert, exact: false },
   { href: "/dashboard/cloudcareai", label: "CloudCareAI", icon: MessageCircle, exact: false },
+  { href: "/dashboard/chatbot-mcp", label: "Chatbot MCP", icon: PlugZap, exact: false },
   { href: "/dashboard/finops", label: "FinOps Intelligence", icon: Zap, exact: false },
 ] as const;
 

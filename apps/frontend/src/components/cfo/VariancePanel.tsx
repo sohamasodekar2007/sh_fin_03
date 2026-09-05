@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, Gauge } from "lucide-react";
 import { toast } from "sonner";
 
 import { Money } from "@/components/Money";
@@ -149,7 +150,7 @@ export function VariancePanel({ proposal, onClose, onDecided }: Props) {
             <header className="flex items-start justify-between gap-4 border-b border-border/70 p-6">
               <div className="min-w-0">
                 <div className="eyebrow">
-                  {deriveProvider(proposal.resource_arn).toUpperCase()} · {deriveServiceLabel(proposal.template_id)}
+                  {deriveProvider(proposal.resource_arn).toUpperCase()} · {deriveServiceLabel(proposal.template_id, proposal.resource_arn, proposal.resource_type)}
                 </div>
                 <h3 className="mt-1.5 text-xl font-semibold leading-tight text-foreground">
                   {proposal.action_type.replace(/_/g, " ")}
@@ -201,6 +202,17 @@ export function VariancePanel({ proposal, onClose, onDecided }: Props) {
                 )}
               </div>
 
+              <div className="mt-6">
+                <div className="eyebrow">Dependency facts</div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {(proposal.dependency_facts?.length ? proposal.dependency_facts : ["No dependency facts recorded"]).map((fact) => (
+                    <Badge key={fact} variant="outline" className="max-w-full break-all text-[10px]">
+                      {fact}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+
               <div className="mt-7">
                 <div className="eyebrow">Evidence</div>
                 <div className="mt-2.5 divide-y divide-border/60">
@@ -223,8 +235,9 @@ export function VariancePanel({ proposal, onClose, onDecided }: Props) {
                 <div className="mt-7 border-t border-border/70 pt-5">
                   {!showRejectForm ? (
                     <div className="flex gap-2">
-                      <Button onClick={handleApprove} disabled={loading !== null} className="flex-1">
-                        {loading === "approve" ? "Approving…" : "Approve"}
+                      <Button size="sm" variant="destructive" onClick={handleApprove} disabled={loading !== null} className="flex-1">
+                        {loading === "approve" ? <Gauge className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5" />}
+                        {loading === "approve" ? "Approving" : "Approve"}
                       </Button>
                       <Button variant="outline" onClick={() => setShowRejectForm(true)} disabled={loading !== null} className="flex-1">
                         Reject

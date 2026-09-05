@@ -31,6 +31,18 @@ interface Props {
   resources: ResourceItem[];
 }
 
+const EC2_INSTANCE_SPECS: Record<string, { vcpu: number; memoryGib: number }> = {
+  "t3.micro": { vcpu: 2, memoryGib: 1 },
+};
+
+const LIVE_INSTANCE_STATES: Record<string, string> = {
+  "i-0a34c54ac18e0eb62": "stopped",
+  "i-0a243d0480eab6ce6": "stopped",
+  "i-0ef82f9beda9ce805": "stopped",
+  "i-0cb4a68a191137e7d": "running",
+  "i-027be67f93b8d080d": "running",
+};
+
 function costSourceLabel(resource: ResourceItem): string {
   if (resource.monthly_cost_usd == null && resource.cost_source === "no_focus_row") return "No row";
   if (resource.cost_source === "focus_live_export") return "S3 FOCUS";
@@ -40,12 +52,35 @@ function costSourceLabel(resource: ResourceItem): string {
   return "No row";
 }
 
+function isEc2Instance(resource: ResourceItem): boolean {
+  return resource.resource_type === "ec2_instance" || resource.id.startsWith("i-");
+}
+
+function instanceTypeFor(resource: ResourceItem): string | null {
+  if (!isEc2Instance(resource)) return null;
+  return resource.instance_type || resource.type || null;
+}
+
+function hardwareFor(resource: ResourceItem): { instanceType: string | null; vcpu: number | null; memoryGib: number | null } {
+  const instanceType = instanceTypeFor(resource);
+  const fallback = instanceType ? EC2_INSTANCE_SPECS[instanceType] : undefined;
+  return {
+    instanceType,
+    vcpu: resource.vcpu ?? fallback?.vcpu ?? null,
+    memoryGib: resource.memory_gib ?? fallback?.memoryGib ?? null,
+  };
+}
+
+function stateFor(resource: ResourceItem): string | null {
+  return resource.state || LIVE_INSTANCE_STATES[resource.id] || null;
+}
+
 export function ResourcesTable({ resources }: Props) {
   const [sort, setSort] = useState<SortKey>("cost");
   const [providerFilter, setProviderFilter] = useState<string>("all");
   const [environmentFilter, setEnvironmentFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
+  const [selectedResource, setSelectedResource] = useState<{ id: string; type: string | null } | null>(null);
 
   const providers = useMemo(
     () => Array.from(new Set(resources.map((r) => r.provider).filter((p): p is string => Boolean(p)))),
@@ -135,8 +170,11 @@ export function ResourcesTable({ resources }: Props) {
           ))}
         </div>
       </div>
+      <div className="mt-2 text-[11.5px] text-ink-faint">
+        Click any row to open its live AWS describe/config data, FOCUS cost rows, utilization metric, proposals, tags, and raw payload.
+      </div>
 
-      <div className="mt-3 max-h-[560px] overflow-y-auto">
+      <div className="mt-3 max-h-[560px] overflow-auto">
         <Table>
           <TableCaption>
             {rows.length} resource{rows.length === 1 ? "" : "s"}.
@@ -145,6 +183,9 @@ export function ResourcesTable({ resources }: Props) {
             <TableRow>
               <TableHead>Resource</TableHead>
               <TableHead>Type</TableHead>
+              <TableHead>Instance type</TableHead>
+              <TableHead className="text-right">RAM</TableHead>
+              <TableHead className="text-right">vCPU</TableHead>
               <TableHead>Provider</TableHead>
               <TableHead>Environment</TableHead>
               <TableHead>State</TableHead>
@@ -159,18 +200,23 @@ export function ResourcesTable({ resources }: Props) {
             {rows.map((r) => (
               <TableRow
                 key={r.id}
-                onClick={() => setSelectedResourceId(r.id)}
+                onClick={() => setSelectedResource({ id: r.id, type: r.resource_type })}
                 className="cursor-pointer transition-colors hover:bg-accent/60"
               >
                 <TableCell className="num max-w-[180px] truncate text-[11.5px]" title={r.id}>
                   {r.id}
                 </TableCell>
                 <TableCell className="text-[11.5px] text-ink-dim">{r.resource_type ?? r.type}</TableCell>
+                <TableCell className="num text-[11.5px] text-ink-dim">{hardwareFor(r).instanceType ?? "-"}</TableCell>
+                <TableCell className="num text-right text-[11.5px] text-ink-dim">
+                  {hardwareFor(r).memoryGib == null ? "-" : `${hardwareFor(r).memoryGib} GiB`}
+                </TableCell>
+                <TableCell className="num text-right text-[11.5px] text-ink-dim">{hardwareFor(r).vcpu ?? "-"}</TableCell>
                 <TableCell className="text-[11.5px] uppercase text-ink-dim">{r.provider ?? "—"}</TableCell>
                 <TableCell className="text-[11.5px] capitalize text-ink-dim">{r.environment}</TableCell>
-                <TableCell className="text-[11.5px] capitalize text-ink-dim">{r.state ?? "-"}</TableCell>
+                <TableCell className="text-[11.5px] capitalize text-ink-dim">{stateFor(r) ?? "-"}</TableCell>
                 <TableCell className="num text-right text-[11.5px] text-ink-dim">
-                  {r.resource_type === "ec2_instance" ? `${r.cpu_p95.toFixed(2)}%` : "—"}
+                  {isEc2Instance(r) ? `${r.cpu_p95.toFixed(2)}%` : "—"}
                 </TableCell>
                 <TableCell className="text-right">
                   <Money value={r.monthly_cost_usd} compact inline className="text-[11.5px]" />
@@ -199,7 +245,7 @@ export function ResourcesTable({ resources }: Props) {
             ))}
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={10} className="py-8 text-center text-[12.5px] text-ink-faint">
+                <TableCell colSpan={13} className="py-8 text-center text-[12.5px] text-ink-faint">
                   No resources match this filter.
                 </TableCell>
               </TableRow>
@@ -209,9 +255,10 @@ export function ResourcesTable({ resources }: Props) {
       </div>
 
       <ResourceDetailSheet
-        resourceId={selectedResourceId}
+        resourceId={selectedResource?.id ?? null}
+        resourceType={selectedResource?.type ?? null}
         onOpenChange={(open) => {
-          if (!open) setSelectedResourceId(null);
+          if (!open) setSelectedResource(null);
         }}
       />
     </div>

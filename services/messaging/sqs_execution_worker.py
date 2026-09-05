@@ -6,6 +6,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from botocore.exceptions import ClientError
+
 from apps.api.config import get_settings
 from apps.api.db import get_db
 from packages.schemas.execution import LiveExecutionRecord
@@ -30,6 +32,15 @@ _worker_state: dict[str, Any] = {
     "last_error": None,
     "last_error_at": None,
     "processed_total": 0,
+}
+
+_FATAL_POLL_ERROR_CODES = {
+    "AccessDenied",
+    "AccessDeniedException",
+    "AWS.SimpleQueueService.NonExistentQueue",
+    "InvalidAddress",
+    "InvalidClientTokenId",
+    "QueueDoesNotExist",
 }
 
 
@@ -233,6 +244,16 @@ async def _worker_loop() -> None:
             except ExecutionQueueDisabled:
                 logger.info("sqs-worker: disabled; stopping")
                 return
+            except ClientError as exc:
+                code = (exc.response.get("Error") or {}).get("Code")
+                _worker_state["last_error"] = str(exc)
+                _worker_state["last_error_at"] = datetime.now(timezone.utc).isoformat()
+                if code in _FATAL_POLL_ERROR_CODES:
+                    logger.error("sqs-worker: fatal poll error %s; stopping worker until configuration is fixed", code)
+                    return
+                logger.exception("sqs-worker: poll failed")
+                await asyncio.sleep(15)
+                continue
             except Exception as exc:
                 _worker_state["last_error"] = str(exc)
                 _worker_state["last_error_at"] = datetime.now(timezone.utc).isoformat()

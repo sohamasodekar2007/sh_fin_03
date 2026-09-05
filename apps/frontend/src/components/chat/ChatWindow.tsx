@@ -111,8 +111,8 @@ function WelcomeMessage() {
         <span className="text-[13px] font-semibold text-foreground">CloudCareAI command layer</span>
       </div>
       <p className="mt-2 text-[12.5px] leading-relaxed text-ink-faint">
-        Ask for spend, findings, approval risk, a fresh scan, or a new workload design. Answers stay tied to CloudCare tools
-        and approval-gated actions.
+        Ask for AWS spend, findings, approval risk, a fresh AWS scan, or a new AWS workload design. Answers stay tied to
+        CloudCare tools and approval-gated actions.
       </p>
       <div className="mt-3 grid gap-2 sm:grid-cols-3">
         {["Observe", "Decide", "Approve"].map((step) => (
@@ -263,15 +263,15 @@ export function ChatWindow() {
         <div className="mt-4 grid gap-2">
           <ModeButton
             active={mode === "existing"}
-            label="Existing cloud"
-            sublabel="Spend, findings, proposals, scans"
+            label="Existing AWS"
+            sublabel="AWS spend, findings, proposals, scans"
             icon={Radar}
             onClick={() => setMode("existing")}
           />
           <ModeButton
             active={mode === "new"}
-            label="New workload"
-            sublabel="Architecture, budget, compliance"
+            label="New AWS workload"
+            sublabel="AWS architecture, budget, compliance"
             icon={BrainCircuit}
             onClick={() => setMode("new")}
           />
@@ -335,7 +335,7 @@ export function ChatWindow() {
             <div className="flex items-center gap-2">
               <MessageSquareText className="size-4 text-signal" />
               <span className="text-[13px] font-semibold text-foreground">
-                {mode === "existing" ? "Cloud operations dialogue" : "Workload design dialogue"}
+                {mode === "existing" ? "AWS operations dialogue" : "AWS workload design dialogue"}
               </span>
             </div>
             <div className="flex flex-wrap gap-1.5">
@@ -359,7 +359,7 @@ export function ChatWindow() {
           {sending && (
             <div className="flex items-center gap-2 text-[12px] text-ink-faint">
               <Loader2 className="size-4 animate-spin" />
-              CloudCareAI is calling the right tools
+              CloudCareAI is calling the right AWS tools
             </div>
           )}
         </div>
@@ -405,7 +405,7 @@ export function ChatWindow() {
                   if (canSend) send(input);
                 }
               }}
-              placeholder={sessionId ? "Ask CloudCareAI..." : "Starting session..."}
+              placeholder={sessionId ? "Ask CloudCareAI about AWS..." : "Starting session..."}
               disabled={!sessionId || sending}
               className="max-h-36 min-h-12 resize-none rounded-md bg-background text-[13px]"
             />

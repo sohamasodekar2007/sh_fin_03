@@ -10,7 +10,7 @@ from apps.api.dependencies import get_current_user
 from apps.api.main import app
 from packages.schemas.chat import ApprovalCard, ChatMessageRequest, ChatSession, CostSummaryCard
 from services.chat.service import handle_chat_message
-from services.chat.tools import UnknownToolError, dispatch_tool
+from services.chat.tools import TOOL_SCHEMAS, UnknownToolError, dispatch_tool
 from services.llm.client import LLMUnavailable
 
 
@@ -155,6 +155,59 @@ def test_existing_mode_dispatches_tool_call_from_llm_response():
     assert response.tool_calls_made == ["get_cost_summary"]
     assert mock_client.complete_with_tools.await_count == 2
     assert any(isinstance(c, CostSummaryCard) for c in response.cards)
+
+
+def test_existing_mode_rejects_non_aws_scope_before_llm():
+    db = _FakeDB()
+    mock_client = AsyncMock()
+
+    with patch("services.chat.service.LLMClient", return_value=mock_client):
+        response = asyncio.run(handle_chat_message(
+            db, "tenant-a", "u1", _session(),
+            ChatMessageRequest(session_id="s1", mode="existing", content="Compare AWS with Azure costs."),
+        ))
+
+    assert "restricted to AWS-related tasks" in response.content
+    assert response.tool_calls_made == []
+    mock_client.complete_with_tools.assert_not_called()
+
+
+@pytest.mark.parametrize("content", ["solve 4 + 4", "hi"])
+def test_existing_mode_rejects_generic_non_aws_prompts_before_llm(content):
+    db = _FakeDB()
+    mock_client = AsyncMock()
+
+    with patch("services.chat.service.LLMClient", return_value=mock_client):
+        response = asyncio.run(handle_chat_message(
+            db, "tenant-a", "u1", _session(),
+            ChatMessageRequest(session_id="s1", mode="existing", content=content),
+        ))
+
+    assert "restricted to AWS-related tasks" in response.content
+    assert response.tool_calls_made == []
+    mock_client.complete_with_tools.assert_not_called()
+
+
+def test_chat_tool_provider_schema_is_aws_only():
+    provider_enums = []
+    for tool in TOOL_SCHEMAS:
+        properties = tool["function"]["parameters"].get("properties", {})
+        provider = properties.get("provider")
+        if provider:
+            provider_enums.append(provider.get("enum"))
+
+    assert provider_enums
+    assert all(enum == ["aws"] for enum in provider_enums)
+
+
+def test_trigger_monitor_agent_rejects_non_aws_provider():
+    db = _FakeDB()
+
+    with patch("apps.api.routers.observation.trigger_monitor_agent", new_callable=AsyncMock) as observe:
+        result = asyncio.run(dispatch_tool(db, "tenant-a", "u1", "trigger_monitor_agent", {"provider": "azure"}))
+
+    assert "AWS-only" in result["error"]
+    observe.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

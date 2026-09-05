@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60
     jwt_algorithm: str = "HS256"
 
+    # Chatbot-only MCP bridge. CHATBOT_MCP_TOKEN is for server-to-server MCP
+    # clients; normal dashboard/chatbot users authenticate with the same JWT
+    # cookie/Bearer token as /v1/chat. The bridge never trusts tenant/user
+    # values from tool arguments.
+    chatbot_mcp_enabled: bool = True
+    chatbot_mcp_token: str = ""
+    chatbot_mcp_tenant_id: str = "demo-tenant"
+    chatbot_mcp_user_id: str = "chatbot-mcp"
+    chatbot_mcp_user_email: str = ""
+
     # SMTP
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587

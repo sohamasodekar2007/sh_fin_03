@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+from botocore.exceptions import ClientError
 
 from apps.api.routers import supervisor
 from packages.schemas.execution import LiveExecutionRecord
@@ -194,3 +196,35 @@ def test_worker_processes_queued_message_and_sends_completion_email():
     assert db.proposals.updates[0][1]["$set"]["status"] == "executing"
     assert db.proposals.updates[-1][1]["$set"]["status"] == "executed"
     assert db.execution_queue_jobs.updates[-1][1]["$set"]["status"] == "processed"
+
+
+def test_worker_stops_on_sqs_access_denied_poll_error():
+    error = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "not authorized"}},
+        "ReceiveMessage",
+    )
+
+    worker._worker_state.update(
+        {
+            "running": False,
+            "started_at": None,
+            "last_poll_at": None,
+            "last_processed_at": None,
+            "last_error": None,
+            "last_error_at": None,
+            "processed_total": 0,
+        }
+    )
+    with patch(
+        "services.messaging.sqs_execution_worker.process_execution_queue_batch",
+        new_callable=AsyncMock,
+        side_effect=error,
+    ), patch(
+        "services.messaging.sqs_execution_worker.get_settings",
+        return_value=SimpleNamespace(sqs_max_messages=5),
+    ):
+        asyncio.run(worker._worker_loop())
+
+    assert worker._worker_state["running"] is False
+    assert "not authorized" in worker._worker_state["last_error"]
+    assert worker._worker_state["last_error_at"]

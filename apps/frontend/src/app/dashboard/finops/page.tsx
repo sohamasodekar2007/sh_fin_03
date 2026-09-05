@@ -3,20 +3,20 @@
 import { RefreshCw } from "lucide-react";
 
 import { Panel } from "@/components/cfo/Panel";
-import { CostBreakdownPanelBody } from "@/components/finops/CostBreakdownPanelBody";
+import { AwsFocusCostPanelBody } from "@/components/finops/AwsFocusCostPanelBody";
+import { AwsFocusUnitSignalsPanelBody } from "@/components/finops/AwsFocusUnitSignalsPanelBody";
 import { ForecastAnomalyPanelBody } from "@/components/finops/ForecastAnomalyPanelBody";
 import { SpendVelocityPanelBody } from "@/components/finops/SpendVelocityPanelBody";
 import { TeamAttributionPanelBody } from "@/components/finops/TeamAttributionPanelBody";
-import { UnitEconomicsPanelBody } from "@/components/finops/UnitEconomicsPanelBody";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { isApiError } from "@/lib/api";
 import {
-  useCostBreakdown,
   useForecastAnomaly,
+  useParquetAnalysis,
   useSpendVelocityAlert,
   useSpendVelocitySeries,
   useTeamAttribution,
-  useUnitEconomics,
 } from "@/lib/queries";
 
 function formatLastUpdated(updatedAt: number) {
@@ -32,15 +32,17 @@ function RealtimePanelAside({
   isFetching,
   updatedAt,
   onRefresh,
+  statusLabel = "Live 15s",
 }: {
   isFetching: boolean;
   updatedAt: number;
   onRefresh: () => void;
+  statusLabel?: string;
 }) {
   return (
     <div className="flex items-center gap-2">
       <span className="hidden text-right text-[11px] leading-tight text-ink-faint sm:block">
-        <span className="block font-medium text-foreground">{isFetching ? "Updating" : "Live 15s"}</span>
+        <span className="block font-medium text-foreground">{isFetching ? "Updating" : statusLabel}</span>
         <span className="num">Last {formatLastUpdated(updatedAt)}</span>
       </span>
       <Button size="sm" variant="outline" onClick={onRefresh} disabled={isFetching}>
@@ -52,20 +54,15 @@ function RealtimePanelAside({
 }
 
 /**
- * FinOps Intelligence — SpendShield-lite / DollarTrace-lite / MarginOS-lite.
- * All three are backed by cloudcare-fintech-addons/api, a standalone
- * FastAPI service (NEXT_PUBLIC_ADDON_API_URL, default localhost:8100), NOT
- * apps/api — same split as the Phase 14 panels on /dashboard/security-findings,
- * except this add-on lives entirely outside the main repo's backend. If that
- * service isn't running, every panel below degrades to a clear "couldn't
- * reach it" message, same discipline as the other .data?.error branches on
- * this page — never a crash.
+ * FinOps Intelligence combines the real-time add-on monitors with the AWS
+ * FOCUS Parquet export already used by /dashboard/parquet-analysis. The AWS
+ * dataset panels below intentionally avoid demo revenue assumptions and show
+ * billing dimensions that exist in Cost Explorer/CUR/FOCUS data.
  */
 export default function FinOpsPage() {
   const alertQuery = useSpendVelocityAlert();
   const seriesQuery = useSpendVelocitySeries();
-  const breakdownQuery = useCostBreakdown();
-  const economicsQuery = useUnitEconomics();
+  const parquetQuery = useParquetAnalysis({ source: "local" });
   const forecastQuery = useForecastAnomaly();
   const teamQuery = useTeamAttribution();
   const spendUpdatedAt = Math.max(alertQuery.dataUpdatedAt, seriesQuery.dataUpdatedAt);
@@ -76,20 +73,18 @@ export default function FinOpsPage() {
       <div className="stage py-1">
         <div className="eyebrow">FinOps intelligence</div>
         <h1 className="mt-1 text-[clamp(1.5rem,2.6vw,2.1rem)] font-bold leading-[1.02] text-foreground">
-          SpendShield · DollarTrace · MarginOS
+          AWS spend operations, live from FOCUS
         </h1>
         <p className="mt-1.5 max-w-2xl text-[12.5px] leading-relaxed text-ink-faint">
-          Three category-defining features layered on the core 5-agent pipeline: a real-time spend-velocity circuit
-          breaker (CUSUM-confirmed, not just a threshold), cost-delta attribution ranked by contribution, and
-          gross-margin economics per merchant. Live below — see cloudcare-fintech-addons/README.md for the merge path.
+          Realtime spend velocity, AWS cost export breakdowns, unit-cost signals, forecast drift, and tag attribution in one operating view.
         </p>
       </div>
 
       <div className="mt-4 grid gap-5 xl:grid-cols-2">
         <Panel
-          eyebrow="SpendShield-lite · live"
+          eyebrow="SpendShield-lite - live"
           title="Spend Velocity Guard"
-          subtitle="Windowed rate-ratio + CUSUM change-point confirmation. Estimated from usage metrics, never a billed figure — that lag is the whole point."
+          subtitle="Windowed rate-ratio + CUSUM change-point confirmation. Estimated from usage metrics, never a billed figure; that lag is the whole point."
           aside={
             <RealtimePanelAside
               isFetching={spendFetching}
@@ -114,56 +109,62 @@ export default function FinOpsPage() {
         </Panel>
 
         <Panel
-          eyebrow="DollarTrace-lite"
-          title="Cost Breakdown"
-          subtitle="Ranks which dimension values explain a cost delta, by absolute contribution — co-occurrence attribution, not causal trace lineage."
+          eyebrow="AWS FOCUS export"
+          title="AWS Cost Dataset"
+          subtitle="AWS FOCUS Parquet grouped by ServiceName, billing account, RegionName, and usage/SKU columns. This follows the real AWS export shape instead of demo margin data."
           aside={
             <RealtimePanelAside
-              isFetching={breakdownQuery.isFetching}
-              updatedAt={breakdownQuery.dataUpdatedAt}
+              isFetching={parquetQuery.isFetching}
+              updatedAt={parquetQuery.dataUpdatedAt}
+              statusLabel="AWS FOCUS"
               onRefresh={() => {
-                void breakdownQuery.refetch();
+                void parquetQuery.refetch();
               }}
             />
           }
           delay={220}
         >
-          {breakdownQuery.isLoading ? (
+          {parquetQuery.isLoading ? (
             <Skeleton className="h-[260px] w-full" />
-          ) : breakdownQuery.isError ? (
+          ) : parquetQuery.isError ? (
             <p className="text-[12.5px] text-destructive">
-              Could not reach the add-on API: {(breakdownQuery.error as { message?: string })?.message ?? "unknown error"}
+              {isApiError(parquetQuery.error)
+                ? parquetQuery.error.message
+                : "Could not load the latest AWS FOCUS Parquet analysis."}
             </p>
-          ) : breakdownQuery.data ? (
-            <CostBreakdownPanelBody breakdown={breakdownQuery.data} />
+          ) : parquetQuery.data ? (
+            <AwsFocusCostPanelBody analysis={parquetQuery.data} />
           ) : null}
         </Panel>
       </div>
 
       <div className="mt-5">
         <Panel
-          eyebrow="MarginOS-lite"
-          title="Unit Economics"
-          subtitle="Cost-per-unit and gross margin per merchant. A scope with no revenue figure gets no margin claim at all, never a fabricated one."
+          eyebrow="AWS FOCUS export - unit signals"
+          title="AWS Unit Cost Signals"
+          subtitle="Realtime operational unit metrics from the same AWS dataset: cost per resource, cost per row, effective cost, top ResourceId lines, and S3 freshness."
           aside={
             <RealtimePanelAside
-              isFetching={economicsQuery.isFetching}
-              updatedAt={economicsQuery.dataUpdatedAt}
+              isFetching={parquetQuery.isFetching}
+              updatedAt={parquetQuery.dataUpdatedAt}
+              statusLabel="AWS FOCUS"
               onRefresh={() => {
-                void economicsQuery.refetch();
+                void parquetQuery.refetch();
               }}
             />
           }
           delay={340}
         >
-          {economicsQuery.isLoading ? (
+          {parquetQuery.isLoading ? (
             <Skeleton className="h-[260px] w-full" />
-          ) : economicsQuery.isError ? (
+          ) : parquetQuery.isError ? (
             <p className="text-[12.5px] text-destructive">
-              Could not reach the add-on API: {(economicsQuery.error as { message?: string })?.message ?? "unknown error"}
+              {isApiError(parquetQuery.error)
+                ? parquetQuery.error.message
+                : "Could not load the latest AWS FOCUS Parquet analysis."}
             </p>
-          ) : economicsQuery.data ? (
-            <UnitEconomicsPanelBody summary={economicsQuery.data} />
+          ) : parquetQuery.data ? (
+            <AwsFocusUnitSignalsPanelBody analysis={parquetQuery.data} />
           ) : null}
         </Panel>
       </div>
@@ -172,7 +173,7 @@ export default function FinOpsPage() {
         <Panel
           eyebrow="Forecast Anomaly Guard"
           title="Daily Cost Forecast"
-          subtitle="Walk-forward: each day is forecast using only prior days, then compared to what actually happened — never a lookahead-biased fit."
+          subtitle="Walk-forward: each day is forecast using only prior days, then compared to what actually happened; never a lookahead-biased fit."
           aside={
             <RealtimePanelAside
               isFetching={forecastQuery.isFetching}
@@ -198,7 +199,7 @@ export default function FinOpsPage() {
         <Panel
           eyebrow="Tag-based attribution"
           title="Cost by Team"
-          subtitle="Grouped by whatever tag key identifies a team at your org (case-insensitive) — untagged spend is its own line item, never hidden."
+          subtitle="Grouped by whatever tag key identifies a team at your org, case-insensitive; untagged spend is its own line item, never hidden."
           aside={
             <RealtimePanelAside
               isFetching={teamQuery.isFetching}

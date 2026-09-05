@@ -27,6 +27,11 @@ from packages.schemas.focus import FocusDataset
 
 logger = logging.getLogger(__name__)
 
+AWS_ONLY_ERROR = (
+    "CloudCareAI is AWS-only. Chat tools can inspect and trigger AWS data only; "
+    "Azure, GCP, VPS, on-prem, and cross-cloud providers are outside this assistant's scope."
+)
+
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -35,16 +40,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Get the most recent Analyzer findings (idle resources, over-provisioned "
                 "instances, unattached volumes, spend anomalies) detected in this tenant's "
-                "connected cloud accounts. Call this whenever the user asks what was found, "
-                "what's wasteful, or what issues exist in their cloud account."
+                "connected AWS account. Call this whenever the user asks what was found, "
+                "what's wasteful, or what issues exist in their AWS account."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "provider": {
                         "type": "string",
-                        "enum": ["aws", "azure", "vps"],
-                        "description": "Restrict to one cloud provider. Omit to include every connected provider.",
+                        "enum": ["aws"],
+                        "description": "AWS only. Omit or pass aws.",
                     }
                 },
                 "required": [],
@@ -74,7 +79,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Get the tenant's total billed cost and top services by spend over a "
                 "trailing window of days. Call this when the user asks about spend, cost "
-                "trends, or how much they are paying."
+                "trends, or how much they are paying for AWS."
             ),
             "parameters": {
                 "type": "object",
@@ -95,13 +100,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "trigger_monitor_agent",
             "description": (
-                "Trigger a fresh cloud resource scan (the Monitor agent) for one provider "
+                "Trigger a fresh AWS resource scan (the Monitor agent) "
                 "right now, instead of waiting for the next hourly run. Call this ONLY when "
                 "the user explicitly asks to re-scan, refresh, or check right now."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"provider": {"type": "string", "enum": ["aws", "azure", "vps"]}},
+                "properties": {"provider": {"type": "string", "enum": ["aws"]}},
                 "required": ["provider"],
             },
         },
@@ -143,8 +148,9 @@ class UnknownToolError(Exception):
 
 async def _tenant_accounts(db: AsyncIOMotorDatabase, tenant_id: str, provider: str | None = None) -> list[dict[str, Any]]:
     query: dict[str, Any] = {"tenant_id": tenant_id, "connected": True}
-    if provider:
-        query["provider"] = provider
+    if provider and provider.strip().lower() != "aws":
+        return []
+    query["provider"] = "aws"
     accounts = await db.cloud_accounts.find(query, {"_id": 0}).to_list(length=None)
     if accounts:
         return accounts
@@ -159,12 +165,7 @@ async def _tenant_accounts(db: AsyncIOMotorDatabase, tenant_id: str, provider: s
     settings = get_settings()
     demo_accounts = [
         {"tenant_id": tenant_id, "provider": "aws", "account_id": settings.aws_account_id or "demo-account", "region": settings.aws_region},
-        {"tenant_id": tenant_id, "provider": "azure", "account_id": settings.azure_subscription_id or "demo-subscription", "region": "global"},
     ]
-    if settings.vps_host:
-        demo_accounts.append({"tenant_id": tenant_id, "provider": "vps", "account_id": settings.vps_host, "region": "on-premises"})
-    if provider:
-        demo_accounts = [a for a in demo_accounts if a["provider"] == provider]
     return demo_accounts
 
 
@@ -174,9 +175,11 @@ async def _tenant_accounts(db: AsyncIOMotorDatabase, tenant_id: str, provider: s
 
 
 async def get_latest_findings(db: AsyncIOMotorDatabase, tenant_id: str, provider: str | None = None) -> dict[str, Any]:
+    if provider and provider.strip().lower() != "aws":
+        return {"error": AWS_ONLY_ERROR}
     accounts = await _tenant_accounts(db, tenant_id, provider)
     if not accounts:
-        return {"findings": [], "message": "No connected cloud accounts for this tenant."}
+        return {"findings": [], "message": "No connected AWS account for this tenant."}
 
     all_findings: list[dict[str, Any]] = []
     for account in accounts:
@@ -201,9 +204,9 @@ async def get_cost_summary(db: AsyncIOMotorDatabase, tenant_id: str, period_days
     period_days = max(1, min(period_days, 90))
     cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
 
-    docs = await db.focus_datasets.find({"tenant_id": tenant_id}, {"_id": 0}).to_list(length=None)
+    docs = await db.focus_datasets.find({"tenant_id": tenant_id, "provider": "aws"}, {"_id": 0}).to_list(length=None)
     if not docs:
-        return {"period_days": period_days, "total_cost_usd": 0.0, "top_services": [], "message": "No FOCUS data ingested yet for this tenant."}
+        return {"period_days": period_days, "total_cost_usd": 0.0, "top_services": [], "message": "No AWS FOCUS data ingested yet for this tenant."}
 
     # Keep only the latest ingestion run per (provider, account_id) so
     # repeated hourly ingests of the same account don't get summed twice.
@@ -234,6 +237,8 @@ async def get_cost_summary(db: AsyncIOMotorDatabase, tenant_id: str, period_days
 
 
 async def trigger_monitor_agent(db: AsyncIOMotorDatabase, tenant_id: str, user_id: str, provider: str) -> dict[str, Any]:
+    if provider.strip().lower() != "aws":
+        return {"error": AWS_ONLY_ERROR}
     accounts = await _tenant_accounts(db, tenant_id, provider)
     if not accounts:
         return {"error": f"No connected {provider} account for this tenant."}

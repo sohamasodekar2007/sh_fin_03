@@ -18,6 +18,7 @@
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8007";
 const TOKEN_STORAGE_KEY = "cloudcare_access_token";
+const REQUEST_TIMEOUT_MS = 8000;
 export const SESSION_COOKIE_NAME = "cloudcare_session";
 
 export interface ApiError {
@@ -71,6 +72,8 @@ function extractMessage(body: unknown, fallback: string): string {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers = new Headers(init.headers);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   if (!headers.has("Content-Type") && init.body !== undefined) {
     headers.set("Content-Type", "application/json");
   }
@@ -78,13 +81,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers, credentials: "include" });
+    response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers, credentials: "include", signal: controller.signal });
   } catch (err) {
     const apiError: ApiError = {
       status: 0,
       message: err instanceof Error ? err.message : "Network error — could not reach the CloudCare API.",
     };
     throw apiError;
+  } finally {
+    window.clearTimeout(timeout);
   }
 
   let body: unknown = undefined;

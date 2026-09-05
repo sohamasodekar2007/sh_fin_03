@@ -146,3 +146,35 @@ def test_dispatch_agent_command_analysis_email_prefers_cloudcare_user_record():
     db.users.find_one.assert_awaited_once_with({"user_id": "demo.user"}, {"_id": 0, "email": 1})
     assert mock_send.call_args.args[0] == "owner@example.com"
     assert result["recipient"] == "ow***r@example.com"
+
+
+def test_persist_run_notifications_updates_saved_command_run():
+    db = MagicMock()
+    collection = MagicMock()
+    collection.update_one = AsyncMock()
+    db.__getitem__.return_value = collection
+    notifications = {
+        "agent_command_analysis_email": {
+            "attempted": True,
+            "sent": True,
+            "recipient": "ow***r@example.com",
+            "reason": None,
+            "provider": "brevo",
+            "errors": [],
+        }
+    }
+
+    asyncio.run(
+        agent_command._persist_run_notifications(
+            db,
+            tenant_id="demo-tenant",
+            run_id="run-123",
+            notifications=notifications,
+        )
+    )
+
+    collection.update_one.assert_awaited_once()
+    query, update = collection.update_one.await_args.args
+    assert query == {"tenant_id": "demo-tenant", "run_id": "run-123"}
+    assert update["$set"]["notifications"] == notifications
+    assert "updated_at" in update["$set"]
