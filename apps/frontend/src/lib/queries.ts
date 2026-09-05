@@ -78,7 +78,7 @@ export function useAgentActivity(limit = 50) {
 
 export function useResources(
   filters?: { environment?: string; status?: string },
-  options: { refetchInterval?: number | false } = {},
+  options: { refetchInterval?: number | false; refetchOnWindowFocus?: boolean } = {},
 ) {
   const params = new URLSearchParams();
   if (filters?.environment) params.set("environment", filters.environment);
@@ -90,7 +90,7 @@ export function useResources(
     refetchInterval: options.refetchInterval ?? 10_000,
     refetchIntervalInBackground: true,
     refetchOnReconnect: true,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: options.refetchOnWindowFocus ?? true,
     staleTime: 0,
   });
 }

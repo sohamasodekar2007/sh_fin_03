@@ -43,37 +43,13 @@ def _status_from_state(state: str | None) -> str:
 
 
 def _last_live_aws_resources(region: str) -> list[Resource]:
-    settings = get_settings()
-    rows = [
-        ("i-0a34c54ac18e0eb62", "CloudCare-Test_server", "dev", "stopped"),
-        ("i-0a243d0480eab6ce6", "CloudCare-Test_server2", "dev", "stopped"),
-        ("i-0ef82f9beda9ce805", "CloudCare_Final", "dev", "stopped"),
-        ("i-0cb4a68a191137e7d", "Cloud_Instance", "dev", "running"),
-        ("i-027be67f93b8d080d", "cc-test-asg-idle", "dev", "running"),
-    ]
-    return [
-        Resource(
-            id=instance_id,
-            type="t3.micro",
-            region=region,
-            cpu_p95=0.0,
-            status=_status_from_state(state),
-            monthly_cost_usd=None,
-            cost_source="no_focus_row",
-            focus_version=settings.focus_version,
-            focus_source="last_live_snapshot",
-            focus_row_count=0,
-            resource_type="ec2_instance",
-            instance_type="t3.micro",
-            vcpu=2,
-            memory_gib=1.0,
-            provider="aws",
-            state=state,
-            tags={"Name": name, "Environment": environment},
-            environment=environment,
-        )
-        for instance_id, name, environment, state in rows
-    ]
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Real AWS inventory is unavailable: no configured AWS profile/session could be used. "
+            "Run the Monitor agent or configure AWS credentials, then retry."
+        ),
+    )
 
 
 def _live_aws_resources(region: str) -> list[Resource]:
@@ -118,17 +94,17 @@ def _live_aws_resources(region: str) -> list[Resource]:
         resources.sort(key=lambda item: (item.state != "running", item.tags.get("Name", ""), item.id))
         return resources
     except ProfileNotFound:
-        logger.warning("resources: configured AWS profile not found; using last live AWS fallback")
+        logger.warning("resources: configured AWS profile not found")
         return _last_live_aws_resources(region)
     except Exception:
-        logger.exception("resources: full AWS fallback failed; using EC2-only fallback")
+        logger.exception("resources: full AWS live collection failed; trying EC2 direct collection")
 
     try:
         session = assumed_write_session("resources-list-ec2")
         ec2 = session.client("ec2", region_name=region)
         resp = ec2.describe_instances()
     except ProfileNotFound:
-        logger.warning("resources: EC2 fallback AWS profile not found; using last live AWS fallback")
+        logger.warning("resources: EC2 direct collection AWS profile not found")
         return _last_live_aws_resources(region)
 
     resources: list[Resource] = []
@@ -964,7 +940,16 @@ async def list_resources(
     """
     try:
         if not await mongo_available():
-            resources = _live_aws_resources(get_settings().aws_region)
+            try:
+                resources = await asyncio.wait_for(
+                    asyncio.to_thread(_live_aws_resources, get_settings().aws_region),
+                    timeout=12.0,
+                )
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=504,
+                    detail="Real AWS inventory collection exceeded 12 seconds. Check AWS credentials/network and retry.",
+                ) from exc
             if environment:
                 resources = [resource for resource in resources if resource.environment == environment]
             if status:
@@ -981,13 +966,16 @@ async def list_resources(
 
         docs = await collection.find(query, {"_id": 0}).to_list(length=None)
         return [Resource(**doc) for doc in docs]
+    except HTTPException:
+        raise
     except ExecutionRefused:
         raise
     except Exception as exc:
-        logger.exception("resources: Mongo read failed; returning live AWS EC2 fallback")
-        resources = _live_aws_resources(get_settings().aws_region)
-        if environment:
-            resources = [resource for resource in resources if resource.environment == environment]
-        if status:
-            resources = [resource for resource in resources if resource.status == status]
-        return resources
+        logger.exception("resources: real resource inventory read failed")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Real resource inventory is unavailable. MongoDB could not be read and CloudCare will not return "
+                "static fallback data on this route."
+            ),
+        ) from exc

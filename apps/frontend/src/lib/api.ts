@@ -18,7 +18,7 @@
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8007";
 const TOKEN_STORAGE_KEY = "cloudcare_access_token";
-const REQUEST_TIMEOUT_MS = 8000;
+const REQUEST_TIMEOUT_MS = 25000;
 export const SESSION_COOKIE_NAME = "cloudcare_session";
 
 export interface ApiError {

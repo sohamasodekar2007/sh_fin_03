@@ -119,8 +119,18 @@ const SERVICE_BLUEPRINTS: Record<string, ServiceBlueprint> = {
   },
 };
 
+function isAbortLikeError(error: unknown) {
+  if (!error) return false;
+  if (typeof error === "object" && "name" in error && String((error as { name?: unknown }).name) === "AbortError") {
+    return true;
+  }
+  const message = isApiError(error) ? error.message : error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return normalized.includes("aborted") || normalized.includes("aborterror") || normalized.includes("signal is aborted");
+}
+
 function asErrorMessage(error: unknown) {
-  if (!error) return null;
+  if (!error || isAbortLikeError(error)) return null;
   if (isApiError(error)) return error.message;
   if (error instanceof Error) return error.message;
   return "Request failed.";
@@ -165,7 +175,7 @@ function slugFromResourceType(type: string) {
   return type.replace(/_/g, "-");
 }
 
-function realServicesFromResources(resources: ResourceItem[]): AwsCoreServiceFactor[] {
+function liveServicesFromResources(resources: ResourceItem[]): AwsCoreServiceFactor[] {
   const types = Array.from(new Set(resources.map((resource) => resource.resource_type).filter(Boolean))) as string[];
   return types.sort().map((type) => ({
     service: serviceNameFromResourceType(type),
@@ -179,7 +189,7 @@ function realServicesFromResources(resources: ResourceItem[]): AwsCoreServiceFac
     approved_executor_actions: type === "ec2_instance" ? ["ec2:StartInstances", "ec2:StopInstances"] : [],
     blocked_executor_actions: type === "lambda_function" ? ["Lambda write policy not configured"] : ["No direct mutation from this page"],
     rules: ["Counts, FOCUS rows, monthly cost, state, tags, owner, and environment are calculated from live resource data."],
-    risk_notes: "This fallback is real inventory driven; metadata API is only used for richer policy descriptions.",
+    risk_notes: "Built directly from the real resource inventory returned by /v1/resources; no static sample data is used.",
   }));
 }
 
@@ -602,14 +612,14 @@ export default function AwsCoreServicesPage() {
   const [search, setSearch] = useState("");
   const [selectedService, setSelectedService] = useState<AwsCoreServiceFactor | null>(null);
 
-  const resourcesQuery = useResources();
+  const resourcesQuery = useResources(undefined, { refetchOnWindowFocus: false });
   const factorQuery = useQuery({
     queryKey: ["aws-core-services-external-factor"],
     queryFn: () => api.get<AwsCoreServicesExternalFactor>("/v1/external-factors/aws-core-services"),
     refetchInterval: 60_000,
     refetchIntervalInBackground: true,
     refetchOnReconnect: true,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
   });
   const governanceQuery = useQuery({
     queryKey: ["aws-core-services-iam-governance"],
@@ -617,13 +627,13 @@ export default function AwsCoreServicesPage() {
     refetchInterval: 60_000,
     refetchIntervalInBackground: true,
     refetchOnReconnect: true,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
   });
 
   const resources = useMemo(() => resourcesQuery.data ?? [], [resourcesQuery.data]);
   const services = useMemo(() => {
     if (factorQuery.data?.services?.length) return factorQuery.data.services;
-    return realServicesFromResources(resources);
+    return liveServicesFromResources(resources);
   }, [factorQuery.data?.services, resources]);
   const counts = useMemo(() => byResourceType(resources), [resources]);
   const typeOptions = useMemo(() => Array.from(new Set(services.flatMap((service) => service.resource_types))).sort(), [services]);
@@ -664,8 +674,11 @@ export default function AwsCoreServicesPage() {
   }, [resources]);
 
   const refreshing = factorQuery.isFetching || resourcesQuery.isFetching || governanceQuery.isFetching;
+  const metadataError = asErrorMessage(factorQuery.error);
   const errorMessage =
-    asErrorMessage(factorQuery.error) || asErrorMessage(resourcesQuery.error) || asErrorMessage(governanceQuery.error);
+    (metadataError && services.length === 0 ? metadataError : null) ||
+    asErrorMessage(resourcesQuery.error) ||
+    asErrorMessage(governanceQuery.error);
 
   return (
     <div className="mx-auto w-full max-w-[1560px]">
@@ -684,7 +697,7 @@ export default function AwsCoreServicesPage() {
           <Badge variant="outline">FOCUS {focusStats.version}</Badge>
           <Badge variant="outline">{focusStats.totalRows} FOCUS rows</Badge>
           <Badge variant="outline">{money(focusStats.totalMonthly)} monthly</Badge>
-          <Badge variant="outline">{factorQuery.data?.source ?? "live inventory fallback"}</Badge>
+          <Badge variant="outline">{factorQuery.data?.source ?? "live inventory"}</Badge>
           <Button size="sm" variant="outline" disabled={refreshing} onClick={() => {
             void factorQuery.refetch();
             void resourcesQuery.refetch();
