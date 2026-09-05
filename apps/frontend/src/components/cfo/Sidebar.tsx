@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Bot,
+  BookOpenCheck,
   Cloud,
   Boxes,
   Database,
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
   { href: "/dashboard/proposals", label: "Proposals", icon: ListChecks, exact: false },
   { href: "/dashboard/agent-command", label: "Agent Command", icon: GitBranch, exact: false },
   { href: "/dashboard/agent-activity", label: "Agent Activity", icon: Bot, exact: false },
+  { href: "/dashboard/setup-guide", label: "Setup Guide", icon: BookOpenCheck, exact: false },
   { href: "/dashboard/connected-providers", label: "Connected Providers", icon: Cloud, exact: false },
   { href: "/dashboard/governance", label: "IAM & Governance", icon: ShieldCheck, exact: false },
   { href: "/dashboard/security-findings", label: "Security Findings", icon: ShieldAlert, exact: false },

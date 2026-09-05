@@ -9,9 +9,13 @@ from services.analyzer.rules import (
     EBSVolume,
     Finding,
     MetricSample,
+    classify_dynamodb_configuration,
     classify_idle,
+    classify_lambda_configuration,
     classify_nonprod_schedule,
     classify_over_provisioned,
+    classify_rds_configuration,
+    classify_security_group_ingress,
     classify_spend_anomaly,
     classify_unattached_ebs,
 )
@@ -222,3 +226,72 @@ class TestClassifySpendAnomaly:
         result = classify_spend_anomaly(costs)
         assert result is not None
         assert result.confidence <= 0.99
+
+
+def test_rds_configuration_flags_private_postgres_single_az_without_deletion_protection():
+    findings = classify_rds_configuration(
+        {
+            "resource_id": "cloudcare-demo-postgres",
+            "resource_type": "rds_instance",
+            "engine": "postgres",
+            "state": "available",
+            "storage_encrypted": True,
+            "publicly_accessible": False,
+            "multi_az": False,
+            "deletion_protection": False,
+            "tags": {"Environment": "dev"},
+        }
+    )
+
+    rule_ids = {finding.rule_id for finding in findings}
+    assert "rds.single_az.v1" in rule_ids
+    assert "rds.deletion_protection_disabled.v1" in rule_ids
+    assert "rds.publicly_accessible.v1" not in rule_ids
+
+
+def test_dynamodb_configuration_flags_pitr_disabled():
+    findings = classify_dynamodb_configuration(
+        {
+            "resource_id": "cloudcare-demo-orders",
+            "resource_type": "dynamodb_table",
+            "point_in_time_recovery_enabled": False,
+            "billing_mode": "PAY_PER_REQUEST",
+            "tags": {},
+        }
+    )
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "dynamodb.pitr_disabled.v1"
+
+
+def test_lambda_configuration_flags_long_timeout():
+    findings = classify_lambda_configuration(
+        {
+            "resource_id": "cloudcare-demo-optimizer-sample",
+            "resource_type": "lambda_function",
+            "runtime": "python3.12",
+            "timeout_seconds": 120,
+            "vpc_config_present": True,
+            "tags": {"Environment": "dev"},
+        }
+    )
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "lambda.long_timeout.v1"
+
+
+def test_security_group_ingress_flags_public_postgres():
+    findings = classify_security_group_ingress(
+        {
+            "resource_id": "sg-0bffcbf0c784abe7f",
+            "resource_type": "security_group",
+            "ingress_rules": [
+                {"protocol": "tcp", "from_port": 5432, "to_port": 5432, "cidr": "0.0.0.0/0"},
+            ],
+            "tags": {},
+        }
+    )
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "sg.open_ingress.v1"
+    assert findings[0].severity == "high"

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -122,14 +122,24 @@ class S3BucketResourceRecord(_AWSResourceRecordBase):
 
 class RDSInstanceResourceRecord(_AWSResourceRecordBase):
     resource_type: Literal["rds_instance"] = "rds_instance"
+    engine: str | None = None
+    storage_encrypted: bool | None = None
+    publicly_accessible: bool | None = None
 
 
 class LambdaFunctionResourceRecord(_AWSResourceRecordBase):
     resource_type: Literal["lambda_function"] = "lambda_function"
+    runtime: str | None = None
+    timeout_seconds: int | None = None
+    memory_size_mb: int | None = None
+    role_arn: str | None = None
+    vpc_config_present: bool | None = None
 
 
 class DynamoDBTableResourceRecord(_AWSResourceRecordBase):
     resource_type: Literal["dynamodb_table"] = "dynamodb_table"
+    billing_mode: str | None = None
+    point_in_time_recovery_enabled: bool | None = None
 
 
 class CloudFrontDistributionResourceRecord(_AWSResourceRecordBase):
@@ -138,6 +148,12 @@ class CloudFrontDistributionResourceRecord(_AWSResourceRecordBase):
 
 class VPCResourceRecord(_AWSResourceRecordBase):
     resource_type: Literal["vpc"] = "vpc"
+
+
+class SecurityGroupResourceRecord(_AWSResourceRecordBase):
+    resource_type: Literal["security_group"] = "security_group"
+    vpc_id: str | None = None
+    ingress_rules: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class IAMUserResourceRecord(_AWSResourceRecordBase):

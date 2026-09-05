@@ -35,6 +35,14 @@ _RULE_TO_TEMPLATE = {
     "ec2.overprovisioned.v1": {"action_type": "resize_instance", "template_id": "ec2.resize.v1", "savings_pct": 0.4},
     "ec2.nonprod_schedule.v1": {"action_type": "schedule_instance", "template_id": "ec2.schedule.v1", "savings_pct": 0.65},
     "ebs.unattached.v1": {"action_type": "delete_volume", "template_id": "ebs.delete.v1", "savings_pct": 1.0},
+    "rds.unencrypted.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
+    "rds.publicly_accessible.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
+    "rds.single_az.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
+    "rds.deletion_protection_disabled.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
+    "dynamodb.pitr_disabled.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
+    "lambda.long_timeout.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
+    "lambda.prod_without_vpc.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
+    "sg.open_ingress.v1": {"action_type": "review_finding", "template_id": "aws.audit_review.v1", "savings_pct": 0.0},
 }
 
 _RISK_BY_ENV = {
@@ -63,6 +71,17 @@ def _monthly_cost_for(resource: dict[str, Any]) -> float:
 def _risk_level_for(resource: dict[str, Any]) -> str:
     env = str(resource.get("environment", "dev")).lower()
     return _RISK_BY_ENV.get(env, "high")
+
+
+def _service_for_resource_type(resource_type: str) -> str:
+    return {
+        "rds_instance": "rds",
+        "dynamodb_table": "dynamodb",
+        "lambda_function": "lambda",
+        "security_group": "ec2",
+        "vpc": "ec2",
+        "s3_bucket": "s3",
+    }.get(resource_type, "resource-groups")
 
 
 def _floor_risk(risk_level: str, floor: str) -> str:
@@ -181,6 +200,16 @@ def build_proposals(observation: dict[str, Any], findings: list[dict[str, Any]])
                 "manual_action_required": True,
                 "description": "Restore the Auto Scaling Group's DesiredCapacity to its prior value.",
             }
+        elif action_type == "review_finding":
+            rule_id = finding["rule_id"]
+            resource_arn = f"arn:aws:{_service_for_resource_type(resource_type)}:{region}:{account_id}:resource/{resource_id}/finding/{rule_id}"
+            parameters = {
+                "resource_id": resource_id,
+                "resource_type": resource_type,
+                "region": region,
+                "rule_id": rule_id,
+            }
+            rollback_plan = None
         else:
             resource_arn = f"arn:aws:ec2:{region}:{account_id}:instance/{resource_id}"
             parameters = {"instance_id": resource_id, "region": region}
@@ -308,7 +337,8 @@ def _build_user_prompt(
     lines: list[str] = ["Proposals (every figure below is FINAL and already decided — never change them):"]
 
     for p in proposals:
-        resource_id = (p.get("parameters") or {}).get("instance_id") or p.get("resource_arn", "unknown")
+        params = p.get("parameters") or {}
+        resource_id = params.get("instance_id") or params.get("volume_id") or params.get("resource_id") or p.get("resource_arn", "unknown")
         context = focus_context.get(resource_id, {})
         resource_name = _sanitize_context_text(context.get("resource_name") or resource_id)
         tags = {

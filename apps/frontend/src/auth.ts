@@ -14,7 +14,11 @@ import Google from "next-auth/providers/google";
  * regardless of which of the two login paths produced it.
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || process.env.API_BASE_URL || "http://localhost:8007";
+const AUTH_SECRET =
+  process.env.AUTH_SECRET ||
+  process.env.NEXTAUTH_SECRET ||
+  (process.env.NODE_ENV === "production" ? undefined : "cloudcare-local-dev-auth-secret");
 
 // Only register a provider once it's actually configured — requesting an
 // unconfigured provider is what produces NextAuth's own raw
@@ -29,6 +33,8 @@ const providers = [
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers,
+  secret: AUTH_SECRET,
+  trustHost: true,
   session: { strategy: "jwt" },
   callbacks: {
     async jwt({ token, account, profile }) {

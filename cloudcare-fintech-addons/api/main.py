@@ -17,14 +17,22 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.routers import aws_trusted_services as aws_trusted_services_router
 from api.routers import cost_attribution as cost_attribution_router
+from api.routers import forecast_anomaly as forecast_anomaly_router
+from api.routers import security_policy_addons as security_policy_addons_router
 from api.routers import spend_velocity as spend_velocity_router
+from api.routers import team_attribution as team_attribution_router
 from api.routers import unit_economics as unit_economics_router
 
 app = FastAPI(
     title="CloudCare Fintech Add-ons (standalone demo)",
-    description="SpendShield-lite / DollarTrace-lite / MarginOS-lite — not part of the main sh_fin_03 backend.",
-    version="0.1.0",
+    description=(
+        "SpendShield-lite / DollarTrace-lite / MarginOS-lite / Forecast Anomaly Guard / "
+        "Team Attribution / Security Policy Add-ons / AWS Trusted Services — not part of "
+        "the main sh_fin_03 backend."
+    ),
+    version="0.2.0",
 )
 
 app.add_middleware(
@@ -37,6 +45,10 @@ app.add_middleware(
 app.include_router(spend_velocity_router.router)
 app.include_router(cost_attribution_router.router)
 app.include_router(unit_economics_router.router)
+app.include_router(forecast_anomaly_router.router)
+app.include_router(team_attribution_router.router)
+app.include_router(security_policy_addons_router.router)
+app.include_router(aws_trusted_services_router.router)
 
 
 @app.get("/health")

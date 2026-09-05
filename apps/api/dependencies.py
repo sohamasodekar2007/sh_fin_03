@@ -74,22 +74,20 @@ async def get_current_user(
             detail="Malformed session token",
         )
         
-    # Check database to ensure user still exists. In development, keep the
-    # dashboard usable when Mongo is not running; production must still fail
-    # closed through the database-backed user check.
-    if settings.app_env == "development" and not await mongo_available():
-        return {
-            "user_id": user_id,
-            "tenant_id": tenant_id,
-            "email": payload.get("email"),
-            "full_name": payload.get("full_name") or payload.get("name"),
-        }
-
+    # Check database to ensure user still exists. In development, try the
+    # configured dependency first so tests and in-process mocks behave like
+    # production. If Mongo itself is unavailable, fall back to token claims to
+    # keep the local dashboard usable.
     db = get_db()
     try:
         user = await db.users.find_one({"user_id": user_id})
     except Exception as exc:
         if settings.app_env == "development":
+            try:
+                if await mongo_available():
+                    raise exc
+            except Exception:
+                pass
             return {
                 "user_id": user_id,
                 "tenant_id": tenant_id,

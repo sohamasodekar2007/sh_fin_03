@@ -9,7 +9,7 @@ from packages.schemas.cloud_metrics import DailyCost, EC2CpuMetric
 
 class CollectionIssue(BaseModel):
     source: Literal[
-        "ec2", "ebs", "vpc", "s3", "rds", "lambda_fn", "dynamodb", "cloudfront", "iam",
+        "ec2", "ebs", "vpc", "security_group", "s3", "rds", "lambda_fn", "dynamodb", "cloudfront", "iam",
         "cloudwatch", "cost_explorer",
         "azure_vm", "azure_disk", "azure_monitor", "azure_cost_management",
     ]

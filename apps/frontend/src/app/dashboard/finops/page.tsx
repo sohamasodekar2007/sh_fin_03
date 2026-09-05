@@ -4,14 +4,18 @@ import { RefreshCw } from "lucide-react";
 
 import { Panel } from "@/components/cfo/Panel";
 import { CostBreakdownPanelBody } from "@/components/finops/CostBreakdownPanelBody";
+import { ForecastAnomalyPanelBody } from "@/components/finops/ForecastAnomalyPanelBody";
 import { SpendVelocityPanelBody } from "@/components/finops/SpendVelocityPanelBody";
+import { TeamAttributionPanelBody } from "@/components/finops/TeamAttributionPanelBody";
 import { UnitEconomicsPanelBody } from "@/components/finops/UnitEconomicsPanelBody";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useCostBreakdown,
+  useForecastAnomaly,
   useSpendVelocityAlert,
   useSpendVelocitySeries,
+  useTeamAttribution,
   useUnitEconomics,
 } from "@/lib/queries";
 
@@ -62,6 +66,8 @@ export default function FinOpsPage() {
   const seriesQuery = useSpendVelocitySeries();
   const breakdownQuery = useCostBreakdown();
   const economicsQuery = useUnitEconomics();
+  const forecastQuery = useForecastAnomaly();
+  const teamQuery = useTeamAttribution();
   const spendUpdatedAt = Math.max(alertQuery.dataUpdatedAt, seriesQuery.dataUpdatedAt);
   const spendFetching = alertQuery.isFetching || seriesQuery.isFetching;
 
@@ -158,6 +164,60 @@ export default function FinOpsPage() {
             </p>
           ) : economicsQuery.data ? (
             <UnitEconomicsPanelBody summary={economicsQuery.data} />
+          ) : null}
+        </Panel>
+      </div>
+
+      <div className="mt-5 grid gap-5 xl:grid-cols-2">
+        <Panel
+          eyebrow="Forecast Anomaly Guard"
+          title="Daily Cost Forecast"
+          subtitle="Walk-forward: each day is forecast using only prior days, then compared to what actually happened — never a lookahead-biased fit."
+          aside={
+            <RealtimePanelAside
+              isFetching={forecastQuery.isFetching}
+              updatedAt={forecastQuery.dataUpdatedAt}
+              onRefresh={() => {
+                void forecastQuery.refetch();
+              }}
+            />
+          }
+          delay={100}
+        >
+          {forecastQuery.isLoading ? (
+            <Skeleton className="h-[260px] w-full" />
+          ) : forecastQuery.isError ? (
+            <p className="text-[12.5px] text-destructive">
+              Could not reach the add-on API: {(forecastQuery.error as { message?: string })?.message ?? "unknown error"}
+            </p>
+          ) : (
+            <ForecastAnomalyPanelBody comparisons={forecastQuery.data ?? []} />
+          )}
+        </Panel>
+
+        <Panel
+          eyebrow="Tag-based attribution"
+          title="Cost by Team"
+          subtitle="Grouped by whatever tag key identifies a team at your org (case-insensitive) — untagged spend is its own line item, never hidden."
+          aside={
+            <RealtimePanelAside
+              isFetching={teamQuery.isFetching}
+              updatedAt={teamQuery.dataUpdatedAt}
+              onRefresh={() => {
+                void teamQuery.refetch();
+              }}
+            />
+          }
+          delay={220}
+        >
+          {teamQuery.isLoading ? (
+            <Skeleton className="h-[260px] w-full" />
+          ) : teamQuery.isError ? (
+            <p className="text-[12.5px] text-destructive">
+              Could not reach the add-on API: {(teamQuery.error as { message?: string })?.message ?? "unknown error"}
+            </p>
+          ) : teamQuery.data ? (
+            <TeamAttributionPanelBody report={teamQuery.data} />
           ) : null}
         </Panel>
       </div>

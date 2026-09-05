@@ -11,7 +11,6 @@ from typing import Literal, Annotated
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Request
 from fastapi.security import OAuth2PasswordBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from webauthn import (
     generate_registration_options,
@@ -32,6 +31,7 @@ from webauthn.helpers.structs import (
 
 from apps.api.config import get_settings
 from apps.api.db import get_db
+from apps.api.security import pwd_context
 from packages.schemas.schemas import (
     LoginRequest,
     LoginBypassRequest,
@@ -52,7 +52,6 @@ from packages.schemas.schemas import (
 )
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="v1/auth/login", auto_error=False)
 
 

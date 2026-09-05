@@ -7,7 +7,7 @@ from services.collector.cloudfront_collector import CloudFrontCollector
 from services.collector.cloudwatch_collector import CloudWatchCollector
 from services.collector.cost_collector import CostExplorerCollector
 from services.collector.dynamodb_collector import DynamoDBCollector
-from services.collector.ec2_collector import EBSCollector, EC2Collector, VPCCollector
+from services.collector.ec2_collector import EBSCollector, EC2Collector, SecurityGroupCollector, VPCCollector
 from services.collector.iam_collector import IAMCollector
 from services.collector.lambda_collector import LambdaCollector
 from services.collector.rds_collector import RDSCollector
@@ -111,6 +111,9 @@ class AWSCollectorService:
     def _run_vpc_collector(self) -> list[Any]:
         return VPCCollector(client_factory=self.client_factory, region=self.region).collect()
 
+    def _run_security_group_collector(self) -> list[Any]:
+        return SecurityGroupCollector(client_factory=self.client_factory, region=self.region).collect()
+
     def _run_s3_collector(self) -> list[Any]:
         return S3Collector(client_factory=self.client_factory, region=self.region).collect()
 
@@ -213,6 +216,7 @@ class AWSCollectorService:
         # that could be mistaken for "you truly have zero of these."
         for source, runner in (
             ("vpc", self._run_vpc_collector),
+            ("security_group", self._run_security_group_collector),
             ("s3", self._run_s3_collector),
             ("rds", self._run_rds_collector),
             ("lambda_fn", self._run_lambda_collector),

@@ -36,6 +36,7 @@ const STATUS_COLOR: Record<ProposalStatus, string> = {
   proposed: "var(--ink-faint)",
   pending_approval: "var(--signal)",
   approved: "var(--mint)",
+  queued_for_execution: "var(--signal)",
   rejected: "var(--graphite)",
   blocked: "var(--destructive)",
   executed: "var(--mint)",
@@ -43,6 +44,22 @@ const STATUS_COLOR: Record<ProposalStatus, string> = {
 };
 
 type SortKey = "cost" | "savings" | "risk" | "confidence";
+
+function formatDate(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function decisionDate(proposal: Proposal) {
+  return proposal.approved_at ?? proposal.rejected_at ?? null;
+}
 
 interface Props {
   proposals: Proposal[];
@@ -139,6 +156,8 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
               <TableHead className="text-right">Monthly cost</TableHead>
               <TableHead>Finding</TableHead>
               <TableHead>Action</TableHead>
+              <TableHead>Created</TableHead>
+              <TableHead>Decision</TableHead>
               <TableHead className="text-right">Savings</TableHead>
               <TableHead>Risk</TableHead>
               <TableHead className="text-right">Confidence</TableHead>
@@ -174,6 +193,8 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
                     {p.template_id}
                   </TableCell>
                   <TableCell className="text-[11.5px] capitalize text-ink-dim">{p.action_type.replace(/_/g, " ")}</TableCell>
+                  <TableCell className="num whitespace-nowrap text-[11px] text-ink-faint">{formatDate(p.created_at)}</TableCell>
+                  <TableCell className="num whitespace-nowrap text-[11px] text-ink-faint">{formatDate(decisionDate(p))}</TableCell>
                   <TableCell className="text-right">
                     <Money value={Number(p.expected_monthly_savings)} compact inline className="text-[11.5px]" style={{ color: "var(--mint)" }} />
                   </TableCell>
@@ -206,7 +227,7 @@ export function ProposalsTable({ proposals, selectedId, onSelect }: Props) {
             })}
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={11} className="py-8 text-center text-[12.5px] text-ink-faint">
+                <TableCell colSpan={13} className="py-8 text-center text-[12.5px] text-ink-faint">
                   No proposals match this filter.
                 </TableCell>
               </TableRow>

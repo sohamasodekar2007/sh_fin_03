@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Area,
@@ -17,14 +17,17 @@ import {
 import {
   Activity,
   BrainCircuit,
-  CheckCircle2,
+  ChevronDown,
   Cpu,
   Database,
   Gauge,
+  Info,
+  ListChecks,
+  MailCheck,
+  MailX,
   Play,
   RadioTower,
   RefreshCw,
-  RotateCw,
   ShieldCheck,
   StopCircle,
   Zap,
@@ -37,7 +40,6 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatMoneyParts } from "@/components/Money";
 import { api, isApiError } from "@/lib/api";
-import { fmtPctOr } from "@/lib/format";
 import type { Proposal } from "@/lib/cloudcare-data";
 
 type Provider = "aws" | "azure" | "vps";
@@ -93,6 +95,23 @@ interface CommandRun {
   chart: CommandChartPoint[];
   proposals: Proposal[];
   executions: Array<Record<string, unknown>>;
+  persistence_error?: string;
+  notifications?: {
+    agent_command_analysis_email?: AgentCommandEmailReceipt;
+  };
+}
+
+interface AgentCommandEmailReceipt {
+  attempted: boolean;
+  sent: boolean;
+  recipient: string | null;
+  reason: string | null;
+  provider?: string | null;
+  errors?: Array<{
+    provider?: string;
+    reason?: string;
+    detail?: string;
+  }>;
 }
 
 interface ExecutionResult {
@@ -102,15 +121,6 @@ interface ExecutionResult {
     reason_codes?: string[];
   };
   verification?: Record<string, unknown> | null;
-}
-
-interface ApprovalResult {
-  status: string;
-  proposal_id: string;
-  execution?: {
-    execution_status?: string;
-    reason_codes?: string[];
-  };
 }
 
 interface EC2Instance {
@@ -129,6 +139,8 @@ const PROVIDERS: Array<{ value: Provider; label: string }> = [
   { value: "vps", label: "VPS" },
 ];
 
+const AUTO_SYNC_MS = 15 * 60 * 1000;
+
 const STEP_ICONS: Record<AgentStep["key"], typeof RadioTower> = {
   monitor: RadioTower,
   analyzer: Activity,
@@ -136,6 +148,13 @@ const STEP_ICONS: Record<AgentStep["key"], typeof RadioTower> = {
   supervisor: ShieldCheck,
   executor: Zap,
 };
+
+function formatCountdown(ms: number) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
 
 const STEP_COLORS: Record<AgentStep["key"], string> = {
   monitor: "var(--signal)",
@@ -152,22 +171,6 @@ function formatMetric(metric: AgentMetric) {
   return String(metric.value);
 }
 
-function riskTone(score: number | undefined) {
-  if (score === undefined || Number.isNaN(score)) return "secondary";
-  if (score < 0.35) return "secondary";
-  if (score < 0.65) return "outline";
-  return "destructive";
-}
-
-function actionLabel(actionType: string) {
-  return actionType.replace(/_/g, " ");
-}
-
-function resourceLabel(resourceArn: string) {
-  const slash = resourceArn.lastIndexOf("/");
-  return slash >= 0 ? resourceArn.slice(slash + 1) : resourceArn;
-}
-
 function shortTimestamp(value: string | undefined) {
   if (!value) return "Waiting";
   const date = new Date(value);
@@ -175,30 +178,14 @@ function shortTimestamp(value: string | undefined) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function executorState(proposal: Proposal) {
-  const executionStatus = proposal.execution_status;
-  const reasons = proposal.execution_reason_codes?.join(", ");
-
-  if (proposal.status === "pending_approval") {
-    return { label: "Awaiting approval", detail: "Human approval required", action: "approve" as const };
+function emailStatusText(email: AgentCommandEmailReceipt | undefined) {
+  if (!email) return "Waiting for next run";
+  if (email.sent) return `Sent to ${email.recipient ?? "configured recipient"}${email.provider ? ` via ${email.provider}` : ""}`;
+  if (email.reason?.includes("BREVO_UNAUTHORIZED_IP") || email.reason?.includes("SMTP_UNAUTHORIZED_IP")) {
+    return "Not sent - authorize IP 115.112.9.139 in Brevo Security > Authorized IPs";
   }
-  if (proposal.status === "approved") {
-    if (executionStatus === "refused" || executionStatus === "failed") {
-      return { label: "Retry", detail: reasons || executionStatus, action: "execute" as const };
-    }
-    return { label: "Execute", detail: "Approved, executor not completed", action: "execute" as const };
-  }
-  if (proposal.status === "executed" || proposal.status === "verified") {
-    const mode = proposal.execution_mode ? ` (${proposal.execution_mode})` : "";
-    return { label: "Done", detail: `${proposal.execution_status ?? proposal.status}${mode}`, action: "none" as const };
-  }
-  if (proposal.status === "blocked") {
-    return { label: "Blocked", detail: reasons || "Policy blocked", action: "none" as const };
-  }
-  if (proposal.status === "rejected") {
-    return { label: "Rejected", detail: proposal.rejection_reason || "Rejected", action: "none" as const };
-  }
-  return { label: "Locked", detail: proposal.status, action: "none" as const };
+  if (email.reason === "NO_RECIPIENT_EMAIL") return "Not sent - no recipient email is configured";
+  return `Not sent${email.reason ? ` - ${email.reason}` : ""}`;
 }
 
 function KpiBox({ label, value, icon: Icon }: { label: string; value: string; icon: typeof Cpu }) {
@@ -213,7 +200,95 @@ function KpiBox({ label, value, icon: Icon }: { label: string; value: string; ic
   );
 }
 
-function AgentCard({ step, index }: { step: AgentStep; index: number }) {
+function valueText(value: unknown) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function JsonBlock({ value }: { value: unknown }) {
+  return (
+    <pre className="max-h-[360px] overflow-auto rounded-md border border-border bg-background p-3 text-[11px] leading-relaxed text-ink-dim">
+      {JSON.stringify(value, null, 2)}
+    </pre>
+  );
+}
+
+function DetailRows({ rows }: { rows: Array<[string, unknown]> }) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {rows.map(([label, value]) => (
+        <div key={label} className="rounded-md border border-border bg-background px-3 py-2.5">
+          <div className="text-[10px] uppercase tracking-[0.1em] text-ink-faint">{label}</div>
+          <div className="num mt-1 break-words text-[12px] font-medium text-foreground">{valueText(value)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function agentDetailRows(step: AgentStep, data: CommandRun | undefined): Array<[string, unknown]> {
+  const summary = data?.summary;
+  const base: Array<[string, unknown]> = [
+    ["Agent key", step.key],
+    ["Status", step.status],
+    ["Run id", data?.run_id],
+    ["Provider", data?.provider],
+    ["Account", data?.account_id],
+    ["Region", data?.region],
+  ];
+
+  if (step.key === "monitor") {
+    return [
+      ...base,
+      ["Focus dataset", data?.focus_dataset_id],
+      ["Focus version", data?.focus_version],
+      ["Focus source", data?.focus_source],
+      ["Focus rows", data?.focus_row_count],
+      ["Resources", summary?.resources],
+    ];
+  }
+  if (step.key === "analyzer") {
+    return [...base, ["Findings", summary?.findings], ["Resources analyzed", summary?.resources]];
+  }
+  if (step.key === "decision") {
+    return [
+      ...base,
+      ["Model router", data?.model_router],
+      ["Decision model", data?.decision_model],
+      ["Proposals", summary?.proposals],
+      ["Potential monthly savings", formatMoneyParts(summary?.potential_monthly_savings ?? 0).usd],
+    ];
+  }
+  if (step.key === "supervisor") {
+    return [
+      ...base,
+      ["Pending approvals", summary?.pending_approvals],
+      ["Blocked", summary?.blocked],
+      ["Total proposals", summary?.proposals],
+    ];
+  }
+  return [
+    ...base,
+    ["Executions total", summary?.executions_total],
+    ["Executed or simulated", summary?.executed_or_simulated],
+    ["Blocked or refused", summary?.blocked_or_refused],
+  ];
+}
+
+function AgentCard({
+  step,
+  index,
+  expanded,
+  onToggle,
+  data,
+}: {
+  step: AgentStep;
+  index: number;
+  expanded: boolean;
+  onToggle: () => void;
+  data: CommandRun | undefined;
+}) {
   const Icon = STEP_ICONS[step.key];
   return (
     <article className="hairline-top flex min-h-[292px] flex-col rounded-md bg-card p-5">
@@ -228,21 +303,46 @@ function AgentCard({ step, index }: { step: AgentStep; index: number }) {
             <p className="mt-0.5 text-[11px] leading-snug text-ink-faint">{step.role}</p>
           </div>
         </div>
-        <Badge variant={step.status === "success" || step.status === "ready" ? "secondary" : "outline"} className="shrink-0">
-          {step.status}
-        </Badge>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant={step.status === "success" || step.status === "ready" ? "secondary" : "outline"}>
+            {step.status}
+          </Badge>
+          <Button type="button" variant="outline" size="icon" className="size-8" onClick={onToggle} aria-label={`${expanded ? "Collapse" : "Expand"} ${step.name}`}>
+            <ChevronDown className={`size-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
+          </Button>
+        </div>
       </div>
 
       <p className="mt-4 min-h-[44px] text-[12.5px] leading-relaxed text-ink-dim">{step.summary}</p>
 
-      <div className="mt-4 grid grid-cols-3 gap-2">
-        {step.metrics.slice(0, 3).map((metric) => (
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        {step.metrics.map((metric) => (
           <div key={metric.label} className="rounded-md border border-border bg-background px-3 py-2.5">
-            <div className="truncate text-[10px] uppercase tracking-[0.1em] text-ink-faint">{metric.label}</div>
-            <div className="num mt-1 truncate text-[13px] font-semibold text-foreground">{formatMetric(metric)}</div>
+            <div className="text-[10px] uppercase tracking-[0.1em] text-ink-faint">{metric.label}</div>
+            <div className="num mt-1 break-words text-[13px] font-semibold text-foreground">{formatMetric(metric)}</div>
           </div>
         ))}
       </div>
+
+      {expanded && (
+        <div className="mt-4 space-y-4 border-t border-border pt-4">
+          <div>
+            <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-ink-faint">
+              <Info className="size-3.5" />
+              Runtime details
+            </div>
+            <DetailRows rows={agentDetailRows(step, data)} />
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-ink-faint">
+              <ListChecks className="size-3.5" />
+              All metrics
+            </div>
+            <JsonBlock value={step.metrics} />
+          </div>
+        </div>
+      )}
 
       <div className="mt-auto pt-4">
         <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-ink-faint">
@@ -264,62 +364,50 @@ function AgentCard({ step, index }: { step: AgentStep; index: number }) {
 export default function AgentCommandPage() {
   const queryClient = useQueryClient();
   const [provider, setProvider] = useState<Provider>("aws");
+  const [expandedSteps, setExpandedSteps] = useState<Record<AgentStep["key"], boolean>>({
+    monitor: true,
+    analyzer: true,
+    decision: true,
+    supervisor: true,
+    executor: true,
+  });
+  const [showPayload, setShowPayload] = useState(true);
+  const [now, setNow] = useState(() => Date.now());
+  const [nextSyncAt, setNextSyncAt] = useState(() => Date.now() + AUTO_SYNC_MS);
 
   const latestQuery = useQuery({
     queryKey: ["agent-command-latest"],
     queryFn: () => api.get<CommandRun>("/v1/agent-command/latest"),
-    refetchInterval: 10_000,
+    refetchInterval: AUTO_SYNC_MS,
+    refetchIntervalInBackground: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
   });
 
   const instancesQuery = useQuery({
     queryKey: ["agent-command-ec2-instances"],
     queryFn: () => api.get<EC2Instance[]>("/v1/agent-command/ec2-instances"),
-    refetchInterval: 10_000,
+    refetchInterval: AUTO_SYNC_MS,
+    refetchIntervalInBackground: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
   });
 
   const runMutation = useMutation({
     mutationFn: () => api.post<CommandRun>(`/v1/agent-command/run?provider=${provider}`),
     onSuccess: (data) => {
+      setNextSyncAt(Date.now() + AUTO_SYNC_MS);
       queryClient.setQueryData(["agent-command-latest"], data);
       queryClient.invalidateQueries({ queryKey: ["proposals"] });
       queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
-    },
-  });
-
-  const executeMutation = useMutation({
-    mutationFn: (proposalId: string) => api.post<ExecutionResult>(`/v1/execute/${proposalId}`),
-    onSuccess: (result) => {
-      const status = result?.execution?.status;
-      const reasons = result?.execution?.reason_codes?.join(", ");
-      if (status === "executed" || status === "no_op") {
-        toast.success("Executor completed.");
+      const email = data.notifications?.agent_command_analysis_email;
+      if (email?.sent) {
+        toast.success(`Analysis email sent to ${email.recipient ?? "configured recipient"}.`);
+      } else if (email?.attempted) {
+        toast.error(emailStatusText(email));
       } else {
-        toast.error(reasons || `Executor ${status ?? "did not complete"}.`);
+        toast.warning(emailStatusText(email));
       }
-      queryClient.invalidateQueries({ queryKey: ["agent-command-latest"] });
-      queryClient.invalidateQueries({ queryKey: ["proposals"] });
-      queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
-    },
-    onError: (err) => {
-      toast.error(isApiError(err) ? err.message : "Could not execute this proposal.");
-    },
-  });
-
-  const approveMutation = useMutation({
-    mutationFn: (proposalId: string) => api.post<ApprovalResult>(`/v1/approvals/${proposalId}/approve`),
-    onSuccess: (result) => {
-      const execution = result?.execution;
-      if (!execution || execution.execution_status === "executed" || execution.execution_status === "no_op") {
-        toast.success("Proposal approved and sent to executor.");
-      } else {
-        toast.error(execution.reason_codes?.join(", ") || `Executor ${execution.execution_status ?? "did not complete"}.`);
-      }
-      queryClient.invalidateQueries({ queryKey: ["agent-command-latest"] });
-      queryClient.invalidateQueries({ queryKey: ["proposals"] });
-      queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
-    },
-    onError: (err) => {
-      toast.error(isApiError(err) ? err.message : "Could not approve this proposal.");
     },
   });
 
@@ -327,6 +415,7 @@ export default function AgentCommandPage() {
     mutationFn: (instanceId: string) =>
       api.post<ExecutionResult>(`/v1/agent-command/ec2-instances/${instanceId}/stop`, { confirm: true }),
     onSuccess: (result) => {
+      setNextSyncAt(Date.now() + AUTO_SYNC_MS);
       const status = result.execution.status;
       if (status === "executed" || status === "no_op") {
         toast.success(status === "no_op" ? "Instance already stopped." : "Instance stopped.");
@@ -349,11 +438,47 @@ export default function AgentCommandPage() {
   const proposals = useMemo(() => data?.proposals ?? [], [data?.proposals]);
   const chart = data?.chart?.length ? data.chart : [{ stage: "Ready", savings: 0 }];
   const pending = proposals.filter((proposal) => proposal.status === "pending_approval");
-  const possible = proposals.filter((proposal) => proposal.status !== "rejected").slice(0, 8);
   const loading = latestQuery.isLoading && !runMutation.data;
   const running = runMutation.isPending;
-  const refreshing = latestQuery.isFetching && !loading && !running;
+  const syncing = (latestQuery.isFetching || instancesQuery.isFetching) && !loading && !running;
   const instances = instancesQuery.data ?? [];
+  const allExpanded = steps.length > 0 && steps.every((step) => expandedSteps[step.key]);
+  const analysisEmail = data?.notifications?.agent_command_analysis_email;
+  const countdown = formatCountdown(nextSyncAt - now);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (now < nextSyncAt || running || syncing) return;
+    setNextSyncAt(Date.now() + AUTO_SYNC_MS);
+    void latestQuery.refetch();
+    void instancesQuery.refetch();
+    void queryClient.invalidateQueries({ queryKey: ["resources"] });
+    void queryClient.invalidateQueries({ queryKey: ["proposals"] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
+  }, [instancesQuery, latestQuery, nextSyncAt, now, queryClient, running, syncing]);
+
+  function setEveryStep(open: boolean) {
+    setExpandedSteps({
+      monitor: open,
+      analyzer: open,
+      decision: open,
+      supervisor: open,
+      executor: open,
+    });
+  }
+
+  function refreshAll() {
+    setNextSyncAt(Date.now() + AUTO_SYNC_MS);
+    void latestQuery.refetch();
+    void instancesQuery.refetch();
+    void queryClient.invalidateQueries({ queryKey: ["resources"] });
+    void queryClient.invalidateQueries({ queryKey: ["proposals"] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
+  }
 
   return (
     <div className="mx-auto w-full max-w-[1560px]">
@@ -372,7 +497,20 @@ export default function AgentCommandPage() {
               </Badge>
               <Badge variant="outline">{data?.focus_source ?? "waiting"}</Badge>
               <Badge variant="outline">{data?.run_id ? `Run ${data.run_id.slice(0, 8)}` : "No run yet"}</Badge>
-              <Badge variant="outline">Refresh 10s</Badge>
+              {analysisEmail ? (
+                <Badge variant={analysisEmail.sent ? "secondary" : "destructive"}>
+                  {analysisEmail.sent ? <MailCheck className="size-3" /> : <MailX className="size-3" />}
+                  {analysisEmail.sent ? "Email sent" : "Email not sent"}
+                </Badge>
+              ) : null}
+              <Badge variant="outline">Auto sync 15m</Badge>
+              <Badge variant="outline" className="num">Next {countdown}</Badge>
+              {syncing ? (
+                <Badge variant="secondary">
+                  <RefreshCw className="size-3 animate-spin" />
+                  Syncing
+                </Badge>
+              ) : null}
             </div>
           </div>
 
@@ -399,16 +537,15 @@ export default function AgentCommandPage() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => {
-                latestQuery.refetch();
-                queryClient.invalidateQueries({ queryKey: ["resources"] });
-                queryClient.invalidateQueries({ queryKey: ["proposals"] });
-                queryClient.invalidateQueries({ queryKey: ["agent-activity"] });
-              }}
-              disabled={refreshing || running}
+              onClick={refreshAll}
+              disabled={syncing || running}
             >
-              <RefreshCw className={refreshing ? "size-4 animate-spin" : "size-4"} />
-              {refreshing ? "Refreshing" : "Refresh"}
+              <RefreshCw className={syncing ? "size-4 animate-spin" : "size-4"} />
+              {syncing ? "Refreshing" : "Refresh"}
+            </Button>
+            <Button variant="outline" onClick={() => setEveryStep(!allExpanded)} disabled={!steps.length}>
+              <ChevronDown className={`size-4 transition-transform ${allExpanded ? "rotate-180" : ""}`} />
+              {allExpanded ? "Collapse agents" : "Expand agents"}
             </Button>
           </div>
         </div>
@@ -433,6 +570,12 @@ export default function AgentCommandPage() {
               {data?.focus_dataset_id ? ` - ${data.focus_dataset_id.slice(0, 8)}` : ""}
             </div>
           </div>
+          <div className="rounded-md border border-border bg-background px-3 py-2.5 sm:col-span-3">
+            <div className="text-[10px] uppercase tracking-[0.12em] text-ink-faint">Analysis email</div>
+            <div className="num mt-1 truncate font-medium text-foreground">
+              {emailStatusText(analysisEmail)}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -454,10 +597,19 @@ export default function AgentCommandPage() {
         )}
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-2 2xl:grid-cols-5">
+      <div className="mt-4 grid gap-3 xl:grid-cols-2 2xl:grid-cols-3">
         {loading
           ? Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-[260px] w-full" />)
-          : steps.map((step, index) => <AgentCard key={step.key} step={step} index={index} />)}
+          : steps.map((step, index) => (
+              <AgentCard
+                key={step.key}
+                step={step}
+                index={index}
+                expanded={expandedSteps[step.key]}
+                onToggle={() => setExpandedSteps((current) => ({ ...current, [step.key]: !current[step.key] }))}
+                data={data}
+              />
+            ))}
       </div>
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.45fr)]">
@@ -481,7 +633,7 @@ export default function AgentCommandPage() {
           </div>
         </Panel>
 
-        <Panel title="Live EC2 control" eyebrow="Human approval" subtitle="Selectively stop running EC2 instances through the Executor path." delay={200}>
+        <Panel title="Live Control" eyebrow="Human approval" subtitle="Selectively stop running EC2 instances through the Executor path." delay={200}>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <Badge variant="outline">{instances.length} instances</Badge>
             <Button
@@ -551,85 +703,6 @@ export default function AgentCommandPage() {
             </table>
           </div>
         </Panel>
-
-        <Panel title="Supervisor queue" eyebrow="HITL" subtitle="Approval moves a proposal into the guarded Executor workflow." delay={220}>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-left text-[12px]">
-              <thead className="border-b border-border text-[10px] uppercase tracking-[0.12em] text-ink-faint">
-                <tr>
-                  <th className="pb-3 pr-3 font-medium">Resource</th>
-                  <th className="pb-3 pr-3 font-medium">Action</th>
-                  <th className="pb-3 pr-3 font-medium">Savings</th>
-                  <th className="pb-3 pr-3 font-medium">Risk</th>
-                  <th className="pb-3 pr-3 font-medium">Status</th>
-                  <th className="pb-3 text-right font-medium">Executor</th>
-                </tr>
-              </thead>
-              <tbody>
-                {possible.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="py-12 text-center text-ink-faint">
-                      Run the pipeline to populate the supervisor queue.
-                    </td>
-                  </tr>
-                ) : (
-                  possible.map((proposal) => {
-                    const riskScore = typeof proposal.risk_score === "number" ? proposal.risk_score : undefined;
-                    const executor = executorState(proposal);
-                    const approving = approveMutation.isPending && approveMutation.variables === proposal.proposal_id;
-                    const executing = executeMutation.isPending && executeMutation.variables === proposal.proposal_id;
-                    const busy = approving || executing;
-                    return (
-                      <tr key={proposal.proposal_id} className="border-b border-border/70 last:border-0">
-                        <td className="py-3 pr-3">
-                          <div className="font-medium text-foreground">{resourceLabel(proposal.resource_arn)}</div>
-                          <div className="num mt-0.5 text-[10.5px] text-ink-faint">{proposal.environment}</div>
-                        </td>
-                        <td className="py-3 pr-3 capitalize text-ink-dim">{actionLabel(proposal.action_type)}</td>
-                        <td className="num py-3 pr-3 font-semibold text-foreground">
-                          {formatMoneyParts(Number(proposal.expected_monthly_savings) || 0).usd}
-                        </td>
-                        <td className="py-3 pr-3">
-                          <Badge variant={riskTone(riskScore)}>
-                            {riskScore === undefined ? proposal.risk_level : fmtPctOr(riskScore, 0)}
-                          </Badge>
-                        </td>
-                        <td className="py-3 pr-3">
-                          <Badge variant={proposal.status === "pending_approval" || proposal.status === "approved" ? "secondary" : "outline"}>{proposal.status}</Badge>
-                          <div className="mt-1 max-w-[220px] truncate text-[10.5px] text-ink-faint" title={executor.detail}>
-                            {executor.detail}
-                          </div>
-                        </td>
-                        <td className="py-3 text-right">
-                          <Button
-                            size="sm"
-                            variant={executor.action === "none" ? "outline" : "default"}
-                            disabled={executor.action === "none" || busy}
-                            onClick={() => {
-                              if (executor.action === "approve") approveMutation.mutate(proposal.proposal_id);
-                              if (executor.action === "execute") executeMutation.mutate(proposal.proposal_id);
-                            }}
-                          >
-                            {busy ? (
-                              <Gauge className="size-3.5 animate-spin" />
-                            ) : executor.action === "approve" ? (
-                              <CheckCircle2 className="size-3.5" />
-                            ) : executor.action === "execute" ? (
-                              <RotateCw className="size-3.5" />
-                            ) : (
-                              <ShieldCheck className="size-3.5" />
-                            )}
-                            {busy ? "Working" : executor.label}
-                          </Button>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
       </div>
 
       <div className="mt-5">
@@ -647,6 +720,24 @@ export default function AgentCommandPage() {
               </Bar>
             </BarChart>
           </ResponsiveContainer>
+        </Panel>
+      </div>
+
+      <div className="mt-5">
+        <Panel title="Run payload explorer" eyebrow="Full response" subtitle="Complete data returned by /v1/agent-command/latest for this dashboard." delay={320}>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <Badge variant="outline">{data?.status ?? "waiting"}</Badge>
+            <Button type="button" variant="outline" size="sm" onClick={() => setShowPayload((value) => !value)}>
+              <ChevronDown className={`size-3.5 transition-transform ${showPayload ? "rotate-180" : ""}`} />
+              {showPayload ? "Hide payload" : "Show payload"}
+            </Button>
+          </div>
+          {data?.persistence_error && (
+            <div className="mb-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+              {data.persistence_error}
+            </div>
+          )}
+          {showPayload ? <JsonBlock value={data ?? { status: "waiting" }} /> : null}
         </Panel>
       </div>
     </div>

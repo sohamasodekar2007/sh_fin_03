@@ -161,11 +161,13 @@ async def trigger_decision_agent(
         try:
             docs = []
             for p in proposals:
-                instance_id = p["parameters"].get("instance_id", "")
-                env_short = resource_env_by_id.get(instance_id, "dev")
+                params = p.get("parameters") or {}
+                resource_id = params.get("instance_id") or params.get("volume_id") or params.get("resource_id") or ""
+                env_short = resource_env_by_id.get(resource_id, "dev")
                 docs.append({
                     "proposal_id": p["proposal_id"],
                     "tenant_id": tenant_id,
+                    "created_at": started_at,
                     "resource_arn": p["resource_arn"],
                     "action_type": p["action_type"],
                     "template_id": p["template_id"],

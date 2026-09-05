@@ -8,6 +8,8 @@ from services.governance.tags import is_excluded
 __all__ = [
     "is_excluded", "classify_idle", "classify_over_provisioned",
     "classify_unattached_ebs", "classify_nonprod_schedule", "classify_spend_anomaly",
+    "classify_rds_configuration", "classify_dynamodb_configuration",
+    "classify_lambda_configuration", "classify_security_group_ingress",
     "percentile", "OFF_HOURS",
 ]
 
@@ -162,3 +164,140 @@ def classify_spend_anomaly(daily_costs: list[float]) -> Finding | None:
             },
         )
     return None
+
+
+def classify_rds_configuration(resource: dict) -> list[Finding]:
+    tags = resource.get("tags") or {}
+    if is_excluded(tags):
+        return []
+
+    findings: list[Finding] = []
+    resource_id = str(resource.get("resource_id") or "")
+    if resource.get("storage_encrypted") is False:
+        findings.append(
+            Finding(
+                rule_id="rds.unencrypted.v1",
+                severity="medium",
+                confidence=0.96,
+                evidence={"storage_encrypted": False, "engine": resource.get("engine")},
+            )
+        )
+    if resource.get("publicly_accessible") is True:
+        findings.append(
+            Finding(
+                rule_id="rds.publicly_accessible.v1",
+                severity="critical",
+                confidence=0.98,
+                evidence={"publicly_accessible": True, "engine": resource.get("engine")},
+            )
+        )
+    if resource.get("multi_az") is False and str(resource.get("state", "")).lower() == "available":
+        findings.append(
+            Finding(
+                rule_id="rds.single_az.v1",
+                severity="medium",
+                confidence=0.90,
+                evidence={"multi_az": False, "state": resource.get("state"), "resource_id": resource_id},
+            )
+        )
+    if resource.get("deletion_protection") is False:
+        findings.append(
+            Finding(
+                rule_id="rds.deletion_protection_disabled.v1",
+                severity="medium",
+                confidence=0.92,
+                evidence={"deletion_protection": False},
+            )
+        )
+    return findings
+
+
+def classify_dynamodb_configuration(resource: dict) -> list[Finding]:
+    tags = resource.get("tags") or {}
+    if is_excluded(tags):
+        return []
+    if resource.get("point_in_time_recovery_enabled") is not False:
+        return []
+    return [
+        Finding(
+            rule_id="dynamodb.pitr_disabled.v1",
+            severity="medium",
+            confidence=0.93,
+            evidence={
+                "point_in_time_recovery_enabled": False,
+                "billing_mode": resource.get("billing_mode") or resource.get("instance_type"),
+            },
+        )
+    ]
+
+
+def classify_lambda_configuration(resource: dict) -> list[Finding]:
+    tags = resource.get("tags") or {}
+    if is_excluded(tags):
+        return []
+
+    findings: list[Finding] = []
+    timeout = resource.get("timeout_seconds")
+    try:
+        timeout_value = int(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        timeout_value = None
+    if timeout_value is not None and timeout_value >= 60:
+        findings.append(
+            Finding(
+                rule_id="lambda.long_timeout.v1",
+                severity="low",
+                confidence=0.86,
+                evidence={"timeout_seconds": timeout_value, "runtime": resource.get("runtime")},
+            )
+        )
+    if resource.get("vpc_config_present") is False and str(resource.get("environment", "")).lower() in {"prod", "production"}:
+        findings.append(
+            Finding(
+                rule_id="lambda.prod_without_vpc.v1",
+                severity="medium",
+                confidence=0.82,
+                evidence={"vpc_config_present": False, "runtime": resource.get("runtime")},
+            )
+        )
+    return findings
+
+
+_SENSITIVE_INGRESS_PORTS = {22: "SSH", 3389: "RDP", 3306: "MySQL", 5432: "PostgreSQL", 27017: "MongoDB", 6379: "Redis"}
+_OPEN_CIDRS = {"0.0.0.0/0", "::/0"}
+
+
+def classify_security_group_ingress(resource: dict) -> list[Finding]:
+    tags = resource.get("tags") or {}
+    if is_excluded(tags):
+        return []
+
+    findings: list[Finding] = []
+    for rule in resource.get("ingress_rules") or []:
+        cidr = rule.get("cidr")
+        if cidr not in _OPEN_CIDRS:
+            continue
+        from_port = rule.get("from_port")
+        to_port = rule.get("to_port")
+        if from_port is None or to_port is None:
+            continue
+        try:
+            port_range = range(int(from_port), int(to_port) + 1)
+        except (TypeError, ValueError):
+            continue
+        exposed = sorted(port for port in _SENSITIVE_INGRESS_PORTS if port in port_range)
+        for port in exposed:
+            findings.append(
+                Finding(
+                    rule_id="sg.open_ingress.v1",
+                    severity="critical" if port in {22, 3389} else "high",
+                    confidence=0.97,
+                    evidence={
+                        "port": port,
+                        "service": _SENSITIVE_INGRESS_PORTS[port],
+                        "protocol": rule.get("protocol"),
+                        "cidr": cidr,
+                    },
+                )
+            )
+    return findings

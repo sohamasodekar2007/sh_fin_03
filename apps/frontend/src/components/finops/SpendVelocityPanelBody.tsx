@@ -8,8 +8,8 @@ import type { FinopsSeverity, SpendSeriesPoint, VelocityAlert } from "@/lib/fino
 
 const SEVERITY_COLOR: Record<FinopsSeverity, string> = {
   low: "var(--mint)",
-  medium: "#d97706",
-  high: "#d97706",
+  medium: "var(--ember)",
+  high: "var(--ember)",
   critical: "var(--destructive)",
 };
 

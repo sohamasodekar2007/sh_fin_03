@@ -179,7 +179,12 @@ def test_lock_is_released_even_when_pipeline_raises(
 
 @patch("services.scheduler.get_settings")
 def test_start_scheduler_noop_when_disabled(mock_get_settings):
-    mock_get_settings.return_value = MagicMock(scheduler_enabled=False, scheduler_interval_minutes=60)
+    mock_get_settings.return_value = MagicMock(
+        scheduler_enabled=False,
+        scheduler_interval_minutes=60,
+        parquet_analysis_interval_minutes=60,
+        focus_export_s3_bucket="",
+    )
 
     result = scheduler.start_scheduler()
 
@@ -188,7 +193,12 @@ def test_start_scheduler_noop_when_disabled(mock_get_settings):
 
 @patch("services.scheduler.get_settings")
 def test_start_scheduler_adds_interval_job_then_shuts_down(mock_get_settings):
-    mock_get_settings.return_value = MagicMock(scheduler_enabled=True, scheduler_interval_minutes=60)
+    mock_get_settings.return_value = MagicMock(
+        scheduler_enabled=True,
+        scheduler_interval_minutes=60,
+        parquet_analysis_interval_minutes=60,
+        focus_export_s3_bucket="",
+    )
 
     # AsyncIOScheduler.start() binds to the running event loop (it's always
     # called from FastAPI's async lifespan in real usage) — needs one here too.
@@ -199,6 +209,10 @@ def test_start_scheduler_adds_interval_job_then_shuts_down(mock_get_settings):
             job = started.get_job(scheduler.JOB_ID)
             assert job is not None
             assert job.trigger.interval == timedelta(minutes=60)
+            parquet_job = started.get_job(scheduler.PARQUET_ANALYSIS_JOB_ID)
+            assert parquet_job is not None
+            assert parquet_job.trigger.interval == timedelta(minutes=60)
+            assert parquet_job.next_run_time is not None
         finally:
             scheduler.shutdown_scheduler()
 

@@ -27,6 +27,7 @@ from apps.api.routers import (
     pipeline,
     recommendations,
     resources,
+    sqs_execution,
     supervisor,
 )
 
@@ -40,6 +41,8 @@ async def lifespan(app: FastAPI):
     from services.chat.service import ensure_chat_indexes
     from services.executor.actions import ensure_execution_lock_index
     from services.executor.execution_audit import ensure_live_audit_indexes
+    from services.messaging.sqs_execution_queue import ensure_execution_queue_indexes
+    from services.messaging.sqs_execution_worker import start_execution_queue_worker, stop_execution_queue_worker
     from services.supervisor.approval_tokens import ensure_approval_indexes
     from services.supervisor.service import ensure_supervisor_indexes
 
@@ -52,6 +55,7 @@ async def lifespan(app: FastAPI):
         await ensure_approval_indexes(db)
         await ensure_execution_lock_index(db)
         await ensure_live_audit_indexes(db)
+        await ensure_execution_queue_indexes(db)
         await ensure_chat_indexes(db)
         await auth.ensure_auth_indexes(db)
         await agent_command.ensure_agent_command_indexes(db)
@@ -59,9 +63,11 @@ async def lifespan(app: FastAPI):
         logger.warning("lifespan: index setup warning: %s", exc)
 
     scheduler.start_scheduler()
+    start_execution_queue_worker()
     try:
         yield
     finally:
+        await stop_execution_queue_worker()
         scheduler.shutdown_scheduler()
 
 settings = get_settings()
@@ -111,6 +117,7 @@ class CorsSafeErrorMiddleware(BaseHTTPMiddleware):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -124,6 +131,7 @@ app.include_router(parquet_analysis.router)
 app.include_router(analysis.router)
 app.include_router(decision.router)
 app.include_router(resources.router)
+app.include_router(sqs_execution.router)
 app.include_router(agent_activity.router)
 app.include_router(agent_command.router)
 app.include_router(recommendations.router)

@@ -8,7 +8,7 @@ import type { MarginResult, UnitEconomicsSummary } from "@/lib/finops-api";
 
 function marginColor(pct: number): string {
   if (pct < 0) return "var(--destructive)";
-  if (pct < 40) return "#d97706";
+  if (pct < 40) return "var(--ember)";
   return "var(--mint)";
 }
 

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
 
@@ -16,9 +16,12 @@ from apps.api.db import get_db
 from apps.api.dependencies import CurrentUser, get_current_user
 from packages.aws.session import AWSClientFactory
 from packages.schemas.execution import LiveExecutionRecord
+from services.analyzer.service import analyze_observation
 from services.collector.collector_service import AWSCollectorService
+from services.decision.service import build_proposals
 from services.executor.actions import ExecutionRefused, assumed_write_session
 from services.executor.execution_audit import MongoLiveExecutionAuditRepository
+from services.notifications.email import send_agent_command_analysis_email_status_sync
 from services.scheduler import run_pipeline_for_account
 
 router = APIRouter(prefix="/v1/agent-command", tags=["agent-command"])
@@ -94,6 +97,88 @@ def _empty_agent_command_doc(settings) -> dict[str, Any]:
         "chart": [],
         "proposals": [],
         "executions": [],
+    }
+
+
+def _run_analysis_email_context(settings, doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": doc.get("run_id") or "latest",
+        "status": doc.get("status", "unknown"),
+        "provider": doc.get("provider", "unknown"),
+        "account_id": doc.get("account_id", "unknown"),
+        "region": doc.get("region", "unknown"),
+        "summary": doc.get("summary") or {},
+        "steps": doc.get("steps") or [],
+        "proposals": doc.get("proposals") or [],
+        "executions": doc.get("executions") or [],
+        "persistence_error": doc.get("persistence_error"),
+        "dashboard_url": f"{settings.app_base_url}/dashboard/agent-command"
+        + (f"?run_id={doc['run_id']}" if doc.get("run_id") else ""),
+    }
+
+
+def _mask_email(email: str) -> str:
+    local, _, domain = email.partition("@")
+    if not domain:
+        return "configured recipient"
+    if len(local) <= 2:
+        masked_local = local[:1] + "*"
+    else:
+        masked_local = local[:2] + "***" + local[-1:]
+    return f"{masked_local}@{domain}"
+
+
+async def _dispatch_agent_command_analysis_email(
+    db: AsyncIOMotorDatabase,
+    background_tasks: BackgroundTasks | None,
+    current_user: dict[str, Any],
+    doc: dict[str, Any],
+) -> dict[str, Any]:
+    settings = get_settings()
+    to_email = current_user.get("email")
+    should_lookup_recipient = not to_email or str(to_email).lower().endswith("@cloudcare.ai")
+    if should_lookup_recipient:
+        try:
+            recipient = None
+            if current_user.get("user_id"):
+                recipient = await db.users.find_one({"user_id": current_user["user_id"]}, {"_id": 0, "email": 1})
+            if not (recipient or {}).get("email"):
+                recipient = await db.users.find_one({"tenant_id": current_user["tenant_id"]}, {"_id": 0, "email": 1})
+            to_email = (recipient or {}).get("email") or to_email
+        except Exception:
+            logger.warning("agent-command: could not look up notification recipient", exc_info=True)
+    if not to_email:
+        logger.warning(
+            "agent-command: no user email on file for tenant %s; analysis email not sent",
+            current_user["tenant_id"],
+        )
+        return {"attempted": False, "sent": False, "recipient": None, "reason": "NO_RECIPIENT_EMAIL"}
+
+    context = _run_analysis_email_context(settings, doc)
+    try:
+        receipt = await asyncio.to_thread(send_agent_command_analysis_email_status_sync, to_email, context, settings)
+    except Exception as exc:  # noqa: BLE001 - command result should still reach the UI
+        logger.exception("agent-command: analysis email send failed")
+        return {
+            "attempted": True,
+            "sent": False,
+            "recipient": _mask_email(to_email),
+            "reason": str(exc),
+            "provider": None,
+            "errors": [{"provider": "application", "reason": "SEND_EXCEPTION", "detail": str(exc)}],
+        }
+    sent = bool(receipt.get("sent"))
+    errors = receipt.get("errors") or []
+    reason = None
+    if not sent:
+        reason = "; ".join(str(error.get("reason") or error.get("detail")) for error in errors) or "EMAIL_SEND_FAILED"
+    return {
+        "attempted": True,
+        "sent": sent,
+        "recipient": _mask_email(to_email),
+        "reason": reason,
+        "provider": receipt.get("provider"),
+        "errors": errors,
     }
 
 
@@ -217,7 +302,7 @@ def _fallback_agent_command_doc(
             executions=[],
             settings=settings,
         ),
-        "chart": _chart_from_proposals([]),
+        "chart": _chart_from_proposals(proposals),
         "proposals": [],
         "executions": [],
     }
@@ -255,6 +340,24 @@ def _live_aws_agent_command_doc(
             error=error or str(exc),
         )
 
+    resource_types: dict[str, int] = {}
+    for resource in snapshot_data.get("resources") or []:
+        resource_type = str(resource.get("resource_type") or "unknown")
+        resource_types[resource_type] = resource_types.get(resource_type, 0) + 1
+
+    findings = analyze_observation(snapshot_data)
+    proposals = build_proposals(snapshot_data, findings)
+    analyzer_summary = {
+        "idle_ec2_findings": sum(1 for f in findings if f.get("rule_id") == "ec2.idle.v1"),
+        "overprovisioned_findings": sum(1 for f in findings if f.get("rule_id") == "ec2.overprovisioned.v1"),
+        "unattached_ebs_findings": sum(1 for f in findings if f.get("rule_id") == "ebs.unattached.v1"),
+        "spend_anomaly_findings": sum(1 for f in findings if f.get("rule_id") == "cost.anomaly.v1"),
+        "rds_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("rds.")),
+        "dynamodb_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("dynamodb.")),
+        "lambda_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("lambda.")),
+        "security_group_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("sg.")),
+    }
+
     monitor = {
         "status": status,
         "agent": "Monitor Agent (Observe)",
@@ -282,14 +385,15 @@ def _live_aws_agent_command_doc(
             ),
             "proposals_resurfaced": 0,
             "collector_issues": len(issues),
+            "resource_types": resource_types,
         },
     }
     pipeline_result = {
         "run_id": run_id,
         "provider": "aws",
         "monitor": monitor,
-        "analyzer": {"status": status, "findings_count": 0, "summary": {}},
-        "decision": {"status": status, "proposals_count": 0, "proposals": [], "llm_used": False},
+        "analyzer": {"status": status, "findings_count": len(findings), "findings": findings, "summary": analyzer_summary},
+        "decision": {"status": status, "proposals_count": len(proposals), "proposals": proposals, "llm_used": False},
         "supervisor": {"status": status, "summary": {"total": 0}},
     }
     focus_meta = _focus_metadata(pipeline_result)
@@ -304,12 +408,12 @@ def _live_aws_agent_command_doc(
         **focus_meta,
         "summary": {
             "resources": resources_count,
-            "findings": 0,
-            "proposals": 0,
+            "findings": len(findings),
+            "proposals": len(proposals),
             "focus_rows": 0,
             "pending_approvals": 0,
             "blocked": 0,
-            "potential_monthly_savings": 0,
+            "potential_monthly_savings": _proposal_savings(proposals),
             **_execution_summary([]),
         },
         "steps": _build_steps(
@@ -319,7 +423,7 @@ def _live_aws_agent_command_doc(
             settings=settings,
         ),
         "chart": _chart_from_proposals([]),
-        "proposals": [],
+        "proposals": proposals,
         "executions": [],
     }
     if error:
@@ -578,11 +682,11 @@ def _build_steps(
             "Analyzer Agent",
             "Detection and ML-style anomaly scoring",
             analyzer.get("status", "success"),
-            f"Produced {analyzer.get('findings_count', 0)} findings across compute, storage, and spend signals.",
+            f"Produced {analyzer.get('findings_count', 0)} findings across compute, storage, database, serverless, network, and spend signals.",
             [
                 {"label": "Findings", "value": analyzer.get("findings_count", 0)},
-                {"label": "Idle", "value": analyzer_summary.get("idle_ec2_findings", 0)},
-                {"label": "Spend spikes", "value": analyzer_summary.get("spend_anomaly_findings", 0)},
+                {"label": "RDS", "value": analyzer_summary.get("rds_findings", 0)},
+                {"label": "SG", "value": analyzer_summary.get("security_group_findings", 0)},
             ],
             ["analyzer_findings", "agent_runs"],
         ),
@@ -840,6 +944,7 @@ async def _freshen_saved_doc(
 @router.post("/run", response_model=dict[str, Any])
 async def run_agent_command(
     current_user: CurrentUser,
+    background_tasks: BackgroundTasks = None,
     provider: str | None = Query(default="aws"),
     account_id: str | None = Query(default=None),
     region: str | None = Query(default=None),
@@ -876,6 +981,11 @@ async def run_agent_command(
             error=persistence_error,
         )
         _LATEST_COMMAND_CACHE[tenant_id] = public_doc
+        public_doc["notifications"] = {
+            "agent_command_analysis_email": await _dispatch_agent_command_analysis_email(
+                db, background_tasks, current_user, public_doc
+            )
+        }
         return public_doc
 
     try:
@@ -885,15 +995,19 @@ async def run_agent_command(
         persistence_error = str(exc)
         logger.exception("agent-command: pipeline failed; returning live AWS fallback for %s", run_id)
         if provider == "aws":
-            instances = _list_ec2_instance_summaries(region)
-            pipeline_result = _fallback_pipeline_result_from_instances(
-                instances=instances,
+            public_doc = _live_aws_agent_command_doc(
+                settings=settings,
                 run_id=run_id,
-                provider=provider,
-                account_id=account_id,
-                region=region,
+                status=status,
                 error=persistence_error,
             )
+            _LATEST_COMMAND_CACHE[tenant_id] = public_doc
+            public_doc["notifications"] = {
+                "agent_command_analysis_email": await _dispatch_agent_command_analysis_email(
+                    db, background_tasks, current_user, public_doc
+                )
+            }
+            return public_doc
         else:
             raise
 
@@ -960,10 +1074,22 @@ async def run_agent_command(
         )
         public_doc = await _freshen_saved_doc(db, tenant_id, doc)
         _LATEST_COMMAND_CACHE[tenant_id] = public_doc
+        public_doc["notifications"] = {
+            "agent_command_analysis_email": await _dispatch_agent_command_analysis_email(
+                db, background_tasks, current_user, public_doc
+            )
+        }
+        _LATEST_COMMAND_CACHE[tenant_id] = public_doc
         return public_doc
     except Exception as exc:  # noqa: BLE001 - Mongo persistence should not erase live AWS collection output
         public_doc["persistence_error"] = public_doc.get("persistence_error") or str(exc)
         logger.exception("agent-command: failed to persist/freshen run %s", run_id)
+        public_doc["notifications"] = {
+            "agent_command_analysis_email": await _dispatch_agent_command_analysis_email(
+                db, background_tasks, current_user, public_doc
+            )
+        }
+        _LATEST_COMMAND_CACHE[tenant_id] = public_doc
         return public_doc
 
 
@@ -1007,10 +1133,8 @@ async def latest_agent_command(current_user: CurrentUser) -> dict[str, Any]:
         if cached:
             return {**cached, "persistence_error": cached.get("persistence_error") or str(exc)}
         try:
-            instances = _list_ec2_instance_summaries(settings.aws_region)
-            doc = _fallback_agent_command_doc(
+            doc = _live_aws_agent_command_doc(
                 settings=settings,
-                instances=instances,
                 run_id=None,
                 status="degraded",
                 error=str(exc),

@@ -1,0 +1,81 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudCareDemoVpcCreateReadTag",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:CreateSubnet",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateTags",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudCareDemoRdsCreateReadTag",
+      "Effect": "Allow",
+      "Action": [
+        "rds:AddTagsToResource",
+        "rds:CreateDBInstance",
+        "rds:CreateDBSubnetGroup",
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBSubnetGroups",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudCareDemoDynamoDbCreateReadSeed",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:ListTables",
+        "dynamodb:PutItem",
+        "dynamodb:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudCareDemoLambdaCreateReadTagInvoke",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:InvokeFunction",
+        "lambda:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudCareDemoLambdaRoleCreate",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PassRole",
+        "iam:TagRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/cloudcare-demo-lambda-role"
+    },
+    {
+      "Sid": "CloudCareDemoRdsServiceLinkedRoleCreate",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "rds.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

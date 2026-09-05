@@ -89,6 +89,14 @@ class AzureClientFactory:
         has a role assignment on the subscription — registering an app and
         granting it access are two separate Azure steps, and this is the
         step that catches a missing one before a collector run does."""
+        if not (
+            self.subscription_id
+            and self.settings.azure_tenant_id
+            and self.settings.azure_client_id
+            and self.settings.azure_client_secret
+        ):
+            return False
+
         try:
             client = self.resource_client()
             next(iter(client.resource_groups.list()), None)

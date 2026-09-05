@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from services.collector.cloudfront_collector import normalize_distribution
 from services.collector.dynamodb_collector import normalize_table
-from services.collector.ec2_collector import normalize_vpc
+from services.collector.ec2_collector import normalize_security_group, normalize_vpc
 from services.collector.iam_collector import normalize_user
 from services.collector.lambda_collector import normalize_function
 from services.collector.rds_collector import normalize_db_instance
@@ -28,6 +28,29 @@ def test_normalize_vpc():
     assert result.instance_type == "10.0.0.0/16"
     assert result.state == "available"
     assert result.environment == "production"
+
+
+def test_normalize_security_group_keeps_open_ingress_rules():
+    group = {
+        "GroupId": "sg-123",
+        "GroupName": "db-access",
+        "VpcId": "vpc-123",
+        "IpPermissions": [
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 5432,
+                "ToPort": 5432,
+                "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+            }
+        ],
+    }
+    result = normalize_security_group(group, region="ap-south-1", collected_at=_now())
+
+    assert result.resource_type == "security_group"
+    assert result.resource_id == "sg-123"
+    assert result.vpc_id == "vpc-123"
+    assert result.ingress_rules[0]["from_port"] == 5432
+    assert "HAS_INTERNET_INGRESS" in result.warnings
 
 
 def test_normalize_bucket_flags_missing_tags():

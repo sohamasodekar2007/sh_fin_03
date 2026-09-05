@@ -9,6 +9,7 @@ from packages.schemas.cloud_resource import (
     DependencyContext,
     EBSVolumeResourceRecord,
     EC2ResourceRecord,
+    SecurityGroupResourceRecord,
     VPCResourceRecord,
 )
 from packages.aws.session import AWSClientFactory
@@ -27,6 +28,10 @@ class EBSCollectionError(Exception):
 
 class VPCCollectionError(Exception):
     """Raised when VPC inventory cannot be collected."""
+
+
+class SecurityGroupCollectionError(Exception):
+    """Raised when security group inventory cannot be collected."""
 
 
 def tags_to_dictionary(
@@ -443,3 +448,82 @@ class VPCCollector:
             ) from error
 
         return vpcs
+
+
+def _security_group_ingress_rules(group: dict) -> list[dict]:
+    rules: list[dict] = []
+    for permission in group.get("IpPermissions", []):
+        protocol = str(permission.get("IpProtocol", "all"))
+        from_port = permission.get("FromPort")
+        to_port = permission.get("ToPort")
+        cidrs = [entry.get("CidrIp") for entry in permission.get("IpRanges", []) if entry.get("CidrIp")]
+        cidrs.extend(entry.get("CidrIpv6") for entry in permission.get("Ipv6Ranges", []) if entry.get("CidrIpv6"))
+        for cidr in cidrs:
+            rules.append(
+                {
+                    "protocol": protocol,
+                    "from_port": from_port,
+                    "to_port": to_port,
+                    "cidr": cidr,
+                }
+            )
+    return rules
+
+
+def normalize_security_group(
+    group: dict,
+    region: str,
+    collected_at: datetime,
+) -> SecurityGroupResourceRecord:
+    tags = tags_to_dictionary(group.get("Tags"))
+    resource_id = group["GroupId"]
+    name = find_tag(tags, "Name") or group.get("GroupName") or resource_id
+    environment = normalize_environment(tags)
+    ingress_rules = _security_group_ingress_rules(group)
+
+    warnings: list[str] = []
+    if not tags:
+        warnings.append("RESOURCE_HAS_NO_TAGS")
+    if any(rule.get("cidr") in {"0.0.0.0/0", "::/0"} for rule in ingress_rules):
+        warnings.append("HAS_INTERNET_INGRESS")
+
+    return SecurityGroupResourceRecord(
+        region=region,
+        resource_id=resource_id,
+        name=name,
+        environment=environment,
+        instance_type=group.get("GroupName") or "security_group",
+        state="active",
+        collected_at=collected_at,
+        tags=tags,
+        warnings=warnings,
+        vpc_id=group.get("VpcId"),
+        ingress_rules=ingress_rules,
+        dependency_context=DependencyContext(missing_ownership=has_missing_ownership(tags)),
+    )
+
+
+class SecurityGroupCollector:
+    def __init__(
+        self,
+        client_factory: AWSClientFactory,
+        region: str,
+    ):
+        self.client_factory = client_factory
+        self.region = region
+
+    def collect(self) -> list[SecurityGroupResourceRecord]:
+        ec2 = self.client_factory.client("ec2", region_name=self.region)
+        paginator = ec2.get_paginator("describe_security_groups")
+        collected_at = datetime.now(timezone.utc)
+
+        groups: list[SecurityGroupResourceRecord] = []
+        try:
+            for page in paginator.paginate():
+                for group in page.get("SecurityGroups", []):
+                    groups.append(normalize_security_group(group, self.region, collected_at))
+        except ClientError as error:
+            error_code = error.response.get("Error", {}).get("Code", "UNKNOWN_AWS_ERROR")
+            raise SecurityGroupCollectionError(f"Security group collection failed: {error_code}") from error
+
+        return groups

@@ -22,6 +22,8 @@ from services.focus.metrics import list_resource_metrics
 
 router = APIRouter(prefix="/v1/agent/analyze", tags=["analyzer-agent-detect"])
 
+_CONFIG_RULE_PREFIXES = ("rds.", "dynamodb.", "lambda.", "sg.")
+
 
 def _default_account_id(settings, provider: str) -> str:
     if provider == "aws":
@@ -66,6 +68,14 @@ async def trigger_analyzer_agent(
             resource_metrics = await list_resource_metrics(db, tenant_id)
             findings = analyze_observation(dataset, resource_metrics)
             focus_dataset_id = dataset.dataset_id
+            snapshot_doc = await db.cloud_snapshots.find_one({"account_id": account_id, "region": region}, {"_id": 0})
+            if snapshot_doc and snapshot_doc.get("resources"):
+                existing = {(f.get("resource_id"), f.get("rule_id")) for f in findings}
+                for finding in analyze_observation(snapshot_doc):
+                    key = (finding.get("resource_id"), finding.get("rule_id"))
+                    if key not in existing and str(finding.get("rule_id", "")).startswith(_CONFIG_RULE_PREFIXES):
+                        findings.append(finding)
+                        existing.add(key)
         else:
             # No FOCUS dataset collected yet for this account — fall back
             # to the legacy CloudSnapshot bundle (analyze_observation's
@@ -96,6 +106,10 @@ async def trigger_analyzer_agent(
                 "unattached_ebs_findings": sum(1 for f in findings if f.get("rule_id") == "ebs.unattached.v1"),
                 "nonprod_schedule_findings": sum(1 for f in findings if f.get("rule_id") == "ec2.nonprod_schedule.v1"),
                 "spend_anomaly_findings": sum(1 for f in findings if f.get("rule_id") == "cost.anomaly.v1"),
+                "rds_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("rds.")),
+                "dynamodb_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("dynamodb.")),
+                "lambda_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("lambda.")),
+                "security_group_findings": sum(1 for f in findings if str(f.get("rule_id", "")).startswith("sg.")),
             }
         }
 
@@ -118,7 +132,7 @@ async def trigger_analyzer_agent(
             finished_at=finished_at,
             input_summary={"provider": provider, "account_id": account_id, "region": region},
             output_summary={
-                "message": f"[{provider}] Found {len(findings)} findings across 5 detection rules",
+                "message": f"[{provider}] Found {len(findings)} findings across compute, storage, database, serverless, network, and spend rules",
                 **result_payload["summary"],
             },
             payload=result_payload,

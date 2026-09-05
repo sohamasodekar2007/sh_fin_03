@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -16,6 +16,7 @@ import {
 import { Panel } from "@/components/cfo/Panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import type {
@@ -206,6 +207,10 @@ const EXECUTOR_BOUNDARY_FALLBACK = {
   ],
 };
 
+const AUTO_SYNC_MS = 15 * 60 * 1000;
+
+type CoverageFilter = "all" | "with_resources" | "implemented" | "planned";
+
 const SERVICE_ICONS: Record<string, typeof Database> = {
   ec2: Zap,
   s3: Database,
@@ -216,6 +221,13 @@ const SERVICE_ICONS: Record<string, typeof Database> = {
   dynamodb: Database,
   cloudfront: ShieldCheck,
 };
+
+function formatCountdown(ms: number) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
 
 function byResourceType(resources: ResourceItem[]) {
   return resources.reduce<Record<string, number>>((acc, resource) => {
@@ -235,14 +247,26 @@ function serviceResources(resources: ResourceItem[], resourceTypes: string[]) {
 }
 
 export default function AwsCoreServicesPage() {
-  const resourcesQuery = useResources();
+  const [now, setNow] = useState(() => Date.now());
+  const [nextSyncAt, setNextSyncAt] = useState(() => Date.now() + AUTO_SYNC_MS);
+  const [coverageFilter, setCoverageFilter] = useState<CoverageFilter>("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const resourcesQuery = useResources(undefined, { refetchInterval: AUTO_SYNC_MS });
   const factorQuery = useQuery({
     queryKey: ["aws-core-services-external-factor"],
     queryFn: () => api.get<AwsCoreServicesExternalFactor>("/v1/external-factors/aws-core-services"),
+    refetchInterval: AUTO_SYNC_MS,
+    refetchIntervalInBackground: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
   });
   const governanceQuery = useQuery({
     queryKey: ["aws-core-services-iam-governance"],
     queryFn: () => api.get<IAMGovernanceOverview>("/v1/governance/iam-overview"),
+    refetchInterval: AUTO_SYNC_MS,
+    refetchIntervalInBackground: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
   });
 
   const resources = useMemo(() => resourcesQuery.data ?? [], [resourcesQuery.data]);
@@ -270,8 +294,45 @@ export default function AwsCoreServicesPage() {
     (sum, service) => sum + service.resource_types.reduce((inner, type) => inner + (counts[type] ?? 0), 0),
     0,
   );
+  const typeOptions = useMemo(
+    () => Array.from(new Set(services.flatMap((service) => service.resource_types))).sort(),
+    [services],
+  );
+  const filteredServices = useMemo(
+    () =>
+      services.filter((service) => {
+        const matchedResources = serviceResources(resources, service.resource_types);
+        if (typeFilter !== "all" && !service.resource_types.includes(typeFilter)) return false;
+        if (coverageFilter === "with_resources" && matchedResources.length === 0 && service.slug !== "iam") return false;
+        if (coverageFilter === "implemented" && service.inventory_status !== "implemented") return false;
+        if (coverageFilter === "planned" && service.inventory_status !== "planned") return false;
+        return true;
+      }),
+    [coverageFilter, resources, services, typeFilter],
+  );
 
   const refreshing = factorQuery.isFetching || resourcesQuery.isFetching || governanceQuery.isFetching;
+  const countdown = formatCountdown(nextSyncAt - now);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (now < nextSyncAt || refreshing) return;
+    setNextSyncAt(Date.now() + AUTO_SYNC_MS);
+    void factorQuery.refetch();
+    void resourcesQuery.refetch();
+    void governanceQuery.refetch();
+  }, [factorQuery, governanceQuery, nextSyncAt, now, refreshing, resourcesQuery]);
+
+  function refreshAll() {
+    setNextSyncAt(Date.now() + AUTO_SYNC_MS);
+    void factorQuery.refetch();
+    void resourcesQuery.refetch();
+    void governanceQuery.refetch();
+  }
 
   return (
     <div className="mx-auto w-full max-w-[1560px]">
@@ -286,16 +347,14 @@ export default function AwsCoreServicesPage() {
           <Badge variant={focusStats.liveExportRows > 0 ? "secondary" : "outline"}>FOCUS {focusStats.version}</Badge>
           <Badge variant="outline">{focusStats.liveExportRows} live-export rows</Badge>
           <Badge variant="outline">{factorQuery.data?.source ?? "external_factor.aws_core_services"}</Badge>
+          <Badge variant="outline">Auto sync 15m</Badge>
+          <Badge variant="outline" className="num">Next {countdown}</Badge>
           {factorQuery.isError ? <Badge variant="destructive">metadata fallback</Badge> : null}
           <Button
             size="sm"
             variant="outline"
             disabled={refreshing}
-            onClick={() => {
-              factorQuery.refetch();
-              resourcesQuery.refetch();
-              governanceQuery.refetch();
-            }}
+            onClick={refreshAll}
           >
             <RefreshCw className={refreshing ? "size-3.5 animate-spin" : "size-3.5"} />
             {refreshing ? "Refreshing" : "Refresh"}
@@ -308,8 +367,38 @@ export default function AwsCoreServicesPage() {
           {factorQuery.isLoading && !services.length ? (
             <Skeleton className="h-[520px] w-full" />
           ) : (
-            <div className="grid gap-3 xl:grid-cols-2">
-              {services.map((service) => {
+            <div>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={coverageFilter} onValueChange={(value) => setCoverageFilter(value as CoverageFilter)}>
+                    <SelectTrigger className="h-8 w-[170px] text-[12px]">
+                      <SelectValue placeholder="Coverage" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All coverage</SelectItem>
+                      <SelectItem value="with_resources">With resources</SelectItem>
+                      <SelectItem value="implemented">Implemented</SelectItem>
+                      <SelectItem value="planned">Planned</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={typeFilter} onValueChange={setTypeFilter}>
+                    <SelectTrigger className="h-8 w-[190px] text-[12px]">
+                      <SelectValue placeholder="Resource type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All resource types</SelectItem>
+                      {typeOptions.map((type) => (
+                        <SelectItem key={type} value={type}>
+                          {type}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Badge variant="outline">{filteredServices.length} visible</Badge>
+              </div>
+              <div className="grid gap-3 xl:grid-cols-2">
+              {filteredServices.map((service) => {
                 const Icon = SERVICE_ICONS[service.slug] ?? Database;
                 const matchedResources = serviceResources(resources, service.resource_types);
                 const governanceError = service.slug === "iam" ? governanceQuery.data?.errors?.users : undefined;
@@ -380,6 +469,12 @@ export default function AwsCoreServicesPage() {
                   </article>
                 );
               })}
+              {filteredServices.length === 0 && (
+                <div className="rounded-md border border-border bg-background p-8 text-center text-[12.5px] text-ink-faint xl:col-span-2">
+                  No services match this coverage/type filter.
+                </div>
+              )}
+              </div>
             </div>
           )}
         </Panel>

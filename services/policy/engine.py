@@ -43,6 +43,7 @@ KNOWN_TEMPLATES = {
     # instance proposes an explicit no_action rather than vanishing.
     "asg.adjust_capacity.v1",
     "ec2.no_action.v1",
+    "aws.audit_review.v1",
 }
 
 

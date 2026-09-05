@@ -18,7 +18,13 @@ from pydantic import BaseModel
 from apps.api.config import get_settings
 from apps.api.db import get_db, mongo_available
 from apps.api.dependencies import CurrentUser, get_current_user
+from apps.api.routers.execution import dispatch_completion_email
 from apps.api.security import decode_access_token
+from services.messaging.sqs_execution_queue import (
+    build_execution_message,
+    enqueue_execution_message,
+    sqs_execution_configured,
+)
 from services.supervisor.approval_tokens import InvalidApprovalToken, consume_nonce_or_raise, decode_approval_token
 from services.supervisor.service import apply_approval_status, run_supervisor_step
 
@@ -79,7 +85,30 @@ async def _execute_after_approval(
     proposal_doc: dict[str, Any],
     tenant_id: str,
     run_id: str,
+    background_tasks: BackgroundTasks | None = None,
 ) -> dict[str, Any]:
+    settings = get_settings()
+    if sqs_execution_configured(settings):
+        message = build_execution_message(
+            proposal_id=proposal_doc["proposal_id"],
+            tenant_id=tenant_id,
+            run_id=run_id,
+            requested_by="approval-flow",
+            source="approval",
+        )
+        receipt = await enqueue_execution_message(db, message)
+        await db.proposals.update_one(
+            {"proposal_id": proposal_doc["proposal_id"], "tenant_id": tenant_id},
+            {"$set": {"status": "queued_for_execution", "execution_queue_message_id": receipt.get("message_id")}},
+        )
+        return {
+            "execution_status": "queued",
+            "execution_mode": "sqs",
+            "queue_message_id": receipt.get("message_id"),
+            "actual_aws_call_made": False,
+            "reason_codes": ["QUEUED_FOR_EXECUTION"],
+        }
+
     from services.executor.actions import execute_action
 
     executable_doc = dict(proposal_doc)
@@ -105,6 +134,13 @@ async def _execute_after_approval(
         {"proposal_id": proposal_doc["proposal_id"], "tenant_id": tenant_id},
         {"$set": update_fields},
     )
+
+    # Same completion email as POST /v1/execute/{proposal_id} — this is the
+    # code path both the dashboard approve button and the one-click email
+    # link actually run through, so without this call a completion email
+    # never fired for either of the two ways a real user approves something.
+    if record.status in ("executed", "no_op"):
+        await dispatch_completion_email(db, background_tasks, tenant_id, proposal_doc, record)
 
     return {
         "execution_id": record.execution_id,
@@ -199,7 +235,9 @@ async def list_approvals(
 
 
 @router.post("/v1/approvals/{proposal_id}/approve", response_model=dict[str, Any])
-async def approve_proposal(proposal_id: str, current_user: CurrentUser) -> dict[str, Any]:
+async def approve_proposal(
+    proposal_id: str, current_user: CurrentUser, background_tasks: BackgroundTasks = None
+) -> dict[str, Any]:
     db = get_db()
     tenant_id = current_user["tenant_id"]
 
@@ -213,7 +251,9 @@ async def approve_proposal(proposal_id: str, current_user: CurrentUser) -> dict[
         db, proposal_id, tenant_id, "approve", current_user["user_id"], via="dashboard"
     )
 
-    result["execution"] = await _execute_after_approval(db, doc, tenant_id, run_id=proposal_id)
+    result["execution"] = await _execute_after_approval(
+        db, doc, tenant_id, run_id=proposal_id, background_tasks=background_tasks
+    )
     return result
 
 
@@ -254,7 +294,7 @@ async def reject_proposal(proposal_id: str, body: RejectRequest, current_user: C
 
 
 @router.get("/v1/approvals/email/{token}")
-async def confirm_approval_via_email(token: str, request: Request) -> Any:
+async def confirm_approval_via_email(token: str, request: Request, background_tasks: BackgroundTasks = None) -> Any:
     db = get_db()
     settings = get_settings()
 
@@ -284,7 +324,7 @@ async def confirm_approval_via_email(token: str, request: Request) -> Any:
     await apply_approval_status(db, proposal_id, tenant_id, action, confirmed_by, via="email")
 
     if action == "approve":
-        await _execute_after_approval(db, doc, tenant_id, run_id=proposal_id)
+        await _execute_after_approval(db, doc, tenant_id, run_id=proposal_id, background_tasks=background_tasks)
     else:
         from services.executor.actions import record_rejected_action
 

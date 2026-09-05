@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { Money } from "@/components/Money";
+import { ResourceDetailSheet } from "@/components/cfo/ResourceDetailSheet";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -11,7 +12,10 @@ import type { ResourceItem, ResourceStatus } from "@/lib/cloudcare-data";
 /**
  * Every monitored resource, independent of whether it has a proposal —
  * this is what makes a healthy, un-flagged real instance visible at all.
- * Same table/filter/sort conventions as ProposalsTable.tsx.
+ * Same table/filter/sort conventions as ProposalsTable.tsx. Clicking any
+ * row opens ResourceDetailSheet — real per-resource FOCUS cost rows,
+ * utilization, and related proposals, not just this row's summary
+ * columns.
  */
 
 const STATUS_COLOR: Record<ResourceStatus, string> = {
@@ -41,6 +45,7 @@ export function ResourcesTable({ resources }: Props) {
   const [providerFilter, setProviderFilter] = useState<string>("all");
   const [environmentFilter, setEnvironmentFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
 
   const providers = useMemo(
     () => Array.from(new Set(resources.map((r) => r.provider).filter((p): p is string => Boolean(p)))),
@@ -152,7 +157,11 @@ export function ResourcesTable({ resources }: Props) {
           </TableHeader>
           <TableBody>
             {rows.map((r) => (
-              <TableRow key={r.id}>
+              <TableRow
+                key={r.id}
+                onClick={() => setSelectedResourceId(r.id)}
+                className="cursor-pointer transition-colors hover:bg-accent/60"
+              >
                 <TableCell className="num max-w-[180px] truncate text-[11.5px]" title={r.id}>
                   {r.id}
                 </TableCell>
@@ -198,6 +207,13 @@ export function ResourcesTable({ resources }: Props) {
           </TableBody>
         </Table>
       </div>
+
+      <ResourceDetailSheet
+        resourceId={selectedResourceId}
+        onOpenChange={(open) => {
+          if (!open) setSelectedResourceId(null);
+        }}
+      />
     </div>
   );
 }

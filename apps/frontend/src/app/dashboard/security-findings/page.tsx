@@ -1,11 +1,20 @@
 "use client";
 
 import { Panel } from "@/components/cfo/Panel";
+import { SecurityPolicyFindingsTable } from "@/components/finops/SecurityPolicyFindingsTable";
+import { TrustScorecardPanelBody } from "@/components/finops/TrustScorecardPanelBody";
 import { RDSRecommendationsPanel } from "@/components/phase14/RDSRecommendationsPanel";
 import { S3RecommendationsPanel } from "@/components/phase14/S3RecommendationsPanel";
 import { SecurityFindingsTable } from "@/components/phase14/SecurityFindingsTable";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useRdsRecommendations, useS3Recommendations, useSecurityFindings } from "@/lib/queries";
+import {
+  useRdsRecommendations,
+  useS3Recommendations,
+  useSecurityFindings,
+  useSecurityPolicyAddons,
+  useTrustScorecard,
+  useTrustedServicesAllowlist,
+} from "@/lib/queries";
 
 /**
  * Phase 14 — Multi-Service Awareness. Every panel here is deliberately
@@ -13,11 +22,20 @@ import { useRdsRecommendations, useS3Recommendations, useSecurityFindings } from
  * posture issue isn't a cost item), no approve/execute button on RDS or
  * S3 (both recommend-only, always) — see services/phase14/schemas.py's
  * module docstring for why that's structural, not just a UI choice.
+ *
+ * The Trust Scorecard and the second findings table below are sourced
+ * from cloudcare-fintech-addons/ (a standalone add-on API), not from
+ * apps/api/routers/phase14.py like the three panels above — same
+ * audit-only discipline, different backend. See
+ * src/lib/finops-api.ts's module docstring.
  */
 export default function SecurityFindingsPage() {
   const findingsQuery = useSecurityFindings();
   const rdsQuery = useRdsRecommendations();
   const s3Query = useS3Recommendations();
+  const scorecardQuery = useTrustScorecard();
+  const allowlistQuery = useTrustedServicesAllowlist();
+  const policyAddonsQuery = useSecurityPolicyAddons();
 
   return (
     <div className="mx-auto w-full max-w-[1400px]">
@@ -33,6 +51,28 @@ export default function SecurityFindingsPage() {
 
       <div className="mt-4">
         <Panel
+          eyebrow="AWS Trusted Services"
+          title="Trust Scorecard"
+          subtitle="Cost Optimization / Security / Fault Tolerance / Service Limits, plus which in-use services fall outside this org's approved allowlist. A simple, auditable score (100 minus 8/finding, 12 extra/critical) — not a black-box risk model."
+          delay={60}
+        >
+          {scorecardQuery.isLoading || allowlistQuery.isLoading ? (
+            <Skeleton className="h-[260px] w-full" />
+          ) : scorecardQuery.isError || allowlistQuery.isError ? (
+            <p className="text-[12.5px] text-destructive">
+              Could not reach the add-on API:{" "}
+              {(scorecardQuery.error as { message?: string })?.message ??
+                (allowlistQuery.error as { message?: string })?.message ??
+                "unknown error"}
+            </p>
+          ) : scorecardQuery.data && allowlistQuery.data ? (
+            <TrustScorecardPanelBody scorecard={scorecardQuery.data} allowlist={allowlistQuery.data} />
+          ) : null}
+        </Panel>
+      </div>
+
+      <div className="mt-5">
+        <Panel
           eyebrow="IAM · audit only"
           title="Overly broad policies"
           subtitle="Wildcard action/resource grants on real users and roles — a security posture issue, not a cost item."
@@ -46,6 +86,25 @@ export default function SecurityFindingsPage() {
             <p className="text-[12.5px] text-ink-faint">IAM security findings are disabled (iam_security_findings_enabled=false).</p>
           ) : (
             <SecurityFindingsTable findings={findingsQuery.data?.findings ?? []} />
+          )}
+        </Panel>
+      </div>
+
+      <div className="mt-5">
+        <Panel
+          eyebrow="Security Policy Add-ons · audit only"
+          title="Open ingress, unencrypted storage, public buckets, stale keys"
+          subtitle="Four checks beyond the IAM wildcard scan above: security-group ingress, EBS/RDS encryption, S3 public exposure, and IAM access-key age."
+          delay={160}
+        >
+          {policyAddonsQuery.isLoading ? (
+            <Skeleton className="h-[260px] w-full" />
+          ) : policyAddonsQuery.isError ? (
+            <p className="text-[12.5px] text-destructive">
+              Could not reach the add-on API: {(policyAddonsQuery.error as { message?: string })?.message ?? "unknown error"}
+            </p>
+          ) : (
+            <SecurityPolicyFindingsTable findings={policyAddonsQuery.data?.findings ?? []} />
           )}
         </Panel>
       </div>

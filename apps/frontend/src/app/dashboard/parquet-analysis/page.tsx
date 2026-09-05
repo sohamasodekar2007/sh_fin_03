@@ -1,14 +1,14 @@
 "use client";
 
 import { useMemo } from "react";
-import { ArrowUpRight, Clock, Database, FileJson, RefreshCw, Server, UploadCloud } from "lucide-react";
+import { ArrowUpRight, Clock, Database, Download, FileJson, RefreshCw, Server, UploadCloud } from "lucide-react";
 
 import { Panel } from "@/components/cfo/Panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { isApiError } from "@/lib/api";
-import type { ParquetBreakdownItem } from "@/lib/cloudcare-data";
+import type { ParquetAnalysis, ParquetBreakdownItem } from "@/lib/cloudcare-data";
 import { useParquetAnalysis } from "@/lib/queries";
 
 function money(value: number | null | undefined) {
@@ -20,6 +20,71 @@ function text(value: unknown) {
   if (value === null || value === undefined || value === "") return "-";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function dateTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function isoDateTime(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function csvValue(value: unknown) {
+  if (value === null || value === undefined) return "";
+  const raw = typeof value === "object" ? JSON.stringify(value) : String(value);
+  const safe = /^[=+\-@]/.test(raw) ? `\t${raw}` : raw;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+function exportParquetReportCsv(data: ParquetAnalysis) {
+  const rows: unknown[][] = [["section", "name", "value", "cost_usd", "rows", "type", "nullable"]];
+  rows.push(["file", "source", data.file.source, "", "", "", ""]);
+  rows.push(["file", "uri", data.file.uri, "", "", "", ""]);
+  rows.push(["file", "bucket", data.file.bucket, "", "", "", ""]);
+  rows.push(["file", "key", data.file.key, "", "", "", ""]);
+  rows.push(["file", "name", data.file.name, "", "", "", ""]);
+  rows.push(["file", "size_bytes", data.file.size_bytes, "", "", "", ""]);
+  rows.push(["file", "compression", data.file.compression, "", "", "", ""]);
+  rows.push(["file", "s3_last_modified", isoDateTime(data.file.last_modified), "", "", "", ""]);
+  rows.push(["report", "generated_at", isoDateTime(data.generated_at), "", "", "", ""]);
+
+  Object.entries(data.summary).forEach(([key, value]) => rows.push(["summary", key, value, "", "", "", ""]));
+
+  Object.entries(data.breakdowns).forEach(([section, items]) => {
+    items.forEach((item) => rows.push([section, item.name, "", item.cost_usd, item.rows, "", ""]));
+  });
+
+  data.schema.forEach((column) => rows.push(["schema", column.name, "", "", "", column.type, column.nullable ? "yes" : "no"]));
+
+  const sampleColumns = Array.from(new Set(data.sample_rows.flatMap((row) => Object.keys(row))));
+  rows.push([]);
+  rows.push(["sample_rows", ...sampleColumns]);
+  data.sample_rows.forEach((row) => rows.push(["sample_rows", ...sampleColumns.map((column) => row[column])]));
+
+  const csv = rows.map((row) => row.map(csvValue).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const modified = isoDateTime(data.file.last_modified).slice(0, 19).replace(/[:T]/g, "-") || "latest";
+  link.href = url;
+  link.download = `cloudcare-parquet-analysis-${modified}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function Stat({ label, value, icon: Icon }: { label: string; value: string; icon: typeof Database }) {
@@ -87,13 +152,18 @@ export default function ParquetAnalysisPage() {
           subtitle="Reads the newest .parquet object from the configured S3 bucket and prefix."
           bodyClassName="p-5 pt-0 sm:p-6 sm:pt-0"
           aside={
-            <Button size="sm" variant="outline" onClick={() => query.refetch()} disabled={query.isFetching}>
-              <RefreshCw className={`size-4 ${query.isFetching ? "animate-spin" : ""}`} /> Refresh
-            </Button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={() => query.refetch()} disabled={query.isFetching}>
+                <RefreshCw className={`size-4 ${query.isFetching ? "animate-spin" : ""}`} /> Refresh
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => data && exportParquetReportCsv(data)} disabled={!data}>
+                <Download className="size-4" /> CSV
+              </Button>
+            </div>
           }
         >
           {data ? (
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-md border border-hairline bg-surface-raised p-3">
                 <div className="eyebrow">Bucket</div>
                 <div className="mt-2 truncate font-mono text-[12px] text-foreground">{data.file.bucket}</div>
@@ -108,6 +178,18 @@ export default function ParquetAnalysisPage() {
                 <div className="eyebrow">Source</div>
                 <div className="mt-2 truncate font-mono text-[12px] text-foreground" title={data.file.uri}>
                   {data.file.uri}
+                </div>
+              </div>
+              <div className="rounded-md border border-hairline bg-surface-raised p-3">
+                <div className="eyebrow">S3 modified</div>
+                <div className="num mt-2 truncate text-[12px] text-foreground" title={isoDateTime(data.file.last_modified)}>
+                  {dateTime(data.file.last_modified)}
+                </div>
+              </div>
+              <div className="rounded-md border border-hairline bg-surface-raised p-3 md:col-span-2 xl:col-span-4">
+                <div className="eyebrow">Report generated</div>
+                <div className="num mt-2 truncate text-[12px] text-foreground" title={isoDateTime(data.generated_at)}>
+                  {dateTime(data.generated_at)}
                 </div>
               </div>
             </div>
@@ -126,7 +208,7 @@ export default function ParquetAnalysisPage() {
             <div className="space-y-3 text-[12.5px]">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-ink-faint">Cadence</span>
-                <span className="num text-foreground">{data.converter.cadence_minutes} min</span>
+                <span className="num text-foreground">{data.converter.parquet_analysis_interval_minutes ?? data.converter.cadence_minutes} min</span>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="text-ink-faint">Automatic refresh</span>

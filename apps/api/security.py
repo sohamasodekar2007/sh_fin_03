@@ -8,12 +8,39 @@ expiring JWTs. Nothing here talks to MongoDB; routers own the DB calls.
 
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from apps.api.config import get_settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class BcryptPasswordContext:
+    """Small bcrypt wrapper compatible with bcrypt 5.x.
+
+    passlib's bcrypt handler currently relies on backend internals that were
+    removed in newer bcrypt releases, which breaks hashing at runtime on this
+    environment. Keep the same .hash/.verify surface used by the routers/tests.
+    """
+
+    @staticmethod
+    def hash(plain_password: str) -> str:
+        password_bytes = plain_password.encode("utf-8")
+        if len(password_bytes) > 72:
+            raise ValueError("bcrypt passwords must be 72 bytes or fewer")
+        return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
+
+    @staticmethod
+    def verify(plain_password: str, hashed_password: str) -> bool:
+        password_bytes = plain_password.encode("utf-8")
+        if len(password_bytes) > 72:
+            return False
+        try:
+            return bcrypt.checkpw(password_bytes, hashed_password.encode("utf-8"))
+        except (TypeError, ValueError):
+            return False
+
+
+pwd_context = BcryptPasswordContext()
 
 
 def hash_password(plain_password: str) -> str:

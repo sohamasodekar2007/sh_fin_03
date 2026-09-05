@@ -11,12 +11,12 @@
  * on THIS app's own origin, which middleware.ts reads to gate protected
  * routes server-side. Neither store is httpOnly — the backend's own
  * access_token cookie (apps/api/routers/auth.py's _set_access_token_cookie)
- * IS httpOnly, but it's set on the API's origin (localhost:8000) and so is
+ * IS httpOnly, but it's set on the API's origin (localhost:8007) and so is
  * never visible to this Next.js app's own server or middleware, which run
- * on a different origin (localhost:3000).
+ * on a different origin (localhost:3000/3002).
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8007";
 const TOKEN_STORAGE_KEY = "cloudcare_access_token";
 export const SESSION_COOKIE_NAME = "cloudcare_session";
 

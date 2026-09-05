@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudCare demo AWS core services for inventory, cost, and optimization visibility.
+
+Parameters:
+  DemoName:
+    Type: String
+    Default: cloudcare-demo
+  DBUsername:
+    Type: String
+    Default: cloudcare_admin
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    MaxLength: 41
+
+Resources:
+  DemoVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.44.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${DemoName}-vpc"
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+
+  DemoSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVpc
+      CidrBlock: 10.44.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${DemoName}-subnet-a"
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+
+  DemoSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVpc
+      CidrBlock: 10.44.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${DemoName}-subnet-b"
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+
+  DemoRdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudCare demo RDS security group with no public ingress.
+      VpcId: !Ref DemoVpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${DemoName}-rds-sg"
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+
+  DemoDbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CloudCare demo private DB subnet group.
+      SubnetIds:
+        - !Ref DemoSubnetA
+        - !Ref DemoSubnetB
+      Tags:
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+
+  DemoDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${DemoName}-postgres"
+      Engine: postgres
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DemoDbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DemoRdsSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 0
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false
+      DeleteAutomatedBackups: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${DemoName}-postgres"
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+        - Key: Owner
+          Value: cloudcare
+
+  DemoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${DemoName}-orders"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${DemoName}-orders"
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+        - Key: Owner
+          Value: cloudcare
+
+  DemoLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${DemoName}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+
+  DemoLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${DemoName}-optimizer-sample"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DemoLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          CLOUDCARE_DEMO: "true"
+          DEMO_TABLE_NAME: !Ref DemoTable
+      Code:
+        ZipFile: |
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          def handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "message": "CloudCare demo Lambda is alive",
+                      "table": os.environ.get("DEMO_TABLE_NAME"),
+                      "timestamp": datetime.now(timezone.utc).isoformat(),
+                  }),
+              }
+      Tags:
+        - Key: Name
+          Value: !Sub "${DemoName}-optimizer-sample"
+        - Key: CloudCareDemo
+          Value: "true"
+        - Key: Environment
+          Value: development
+        - Key: Owner
+          Value: cloudcare
+
+Outputs:
+  VpcId:
+    Value: !Ref DemoVpc
+  SubnetAId:
+    Value: !Ref DemoSubnetA
+  SubnetBId:
+    Value: !Ref DemoSubnetB
+  DynamoDBTableName:
+    Value: !Ref DemoTable
+  LambdaFunctionName:
+    Value: !Ref DemoLambdaFunction
+  RDSInstanceIdentifier:
+    Value: !Ref DemoDatabase
+  RDSEndpoint:
+    Value: !GetAtt DemoDatabase.Endpoint.Address
+  RDSUsername:
+    Value: !Ref DBUsername

@@ -72,6 +72,8 @@ def _service_fields(resource_type: str | None) -> tuple[str, str]:
         return "Amazon CloudFront", "Networking"
     if resource_type == "vpc":
         return "Amazon Virtual Private Cloud", "Networking"
+    if resource_type == "security_group":
+        return "Amazon Virtual Private Cloud", "Networking"
     if resource_type == "iam_user":
         return "AWS Identity and Access Management", "Identity"
     # Default / ec2_instance / anything unrecognized.
@@ -172,6 +174,26 @@ def _synthesize_from_snapshot(snapshot: dict[str, Any], tenant_id: str, focus_ve
                 # need provider-specific ID string matching to find it.
                 if resource.get("state") is not None:
                     extensions["x_resource_state"] = resource.get("state")
+                dependency_context = resource.get("dependency_context") or {}
+                for key in ("multi_az", "deletion_protection"):
+                    if dependency_context.get(key) is not None:
+                        extensions[f"x_{key}"] = dependency_context.get(key)
+                for key in (
+                    "engine",
+                    "storage_encrypted",
+                    "publicly_accessible",
+                    "billing_mode",
+                    "point_in_time_recovery_enabled",
+                    "runtime",
+                    "timeout_seconds",
+                    "memory_size_mb",
+                    "role_arn",
+                    "vpc_config_present",
+                    "vpc_id",
+                    "ingress_rules",
+                ):
+                    if resource.get(key) is not None:
+                        extensions[f"x_{key}"] = resource.get(key)
                 source_warnings = resource.get("warnings")
                 if source_warnings:
                     extensions["x_source_resource_warnings"] = source_warnings
@@ -231,6 +253,26 @@ def _synthesize_from_snapshot(snapshot: dict[str, Any], tenant_id: str, focus_ve
                     **({"x_resource_state": resource.get("state")} if resource.get("state") is not None else {}),
                 },
             }
+            dependency_context = resource.get("dependency_context") or {}
+            for key in ("multi_az", "deletion_protection"):
+                if dependency_context.get(key) is not None:
+                    raw["extensions"][f"x_{key}"] = dependency_context.get(key)
+            for key in (
+                "engine",
+                "storage_encrypted",
+                "publicly_accessible",
+                "billing_mode",
+                "point_in_time_recovery_enabled",
+                "runtime",
+                "timeout_seconds",
+                "memory_size_mb",
+                "role_arn",
+                "vpc_config_present",
+                "vpc_id",
+                "ingress_rules",
+            ):
+                if resource.get(key) is not None:
+                    raw["extensions"][f"x_{key}"] = resource.get(key)
             record, row_warnings = FocusRecord.from_raw(raw)
             warnings.append(f"no_cost_data_available_for_resource:row_{row_index}")
             warnings.extend(f"{w}:row_{row_index}" for w in row_warnings)

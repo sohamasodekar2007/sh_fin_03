@@ -42,6 +42,7 @@ LOCK_COLLECTION = "scheduler_locks"
 LOCK_TTL_SECONDS = 30 * 60
 
 JOB_ID = "cloudcare_hourly_pipeline"
+PARQUET_ANALYSIS_JOB_ID = "s3_parquet_analysis_hourly_rewrite"
 
 # Bounds how many (provider, account) pipelines run at once — a slow or
 # rate-limited provider must not delay every other account's hourly run,
@@ -222,10 +223,11 @@ async def run_all_connected_accounts() -> None:
 async def refresh_s3_parquet_analysis_job() -> None:
     """Refresh the dashboard-ready Parquet analysis artifact in S3.
 
-    Uses the same hourly cadence as the CloudCare pipeline and only runs
-    when FOCUS_EXPORT_S3_BUCKET is configured. Failures are logged so a bad
-    export object never prevents the main monitor/analyzer pipeline from
-    running on the next tick.
+    Runs on its own hourly cadence and only runs when FOCUS_EXPORT_S3_BUCKET
+    is configured. Each run lists S3 and analyzes the newest .parquet object,
+    so a newly delivered export is picked up on the next tick. Failures are
+    logged so a bad export object never prevents the main monitor/analyzer
+    pipeline from running on the next tick.
     """
     settings = get_settings()
     if not settings.focus_export_s3_bucket:
@@ -260,14 +262,19 @@ def start_scheduler() -> AsyncIOScheduler | None:
     _scheduler.add_job(
         refresh_s3_parquet_analysis_job,
         "interval",
-        minutes=settings.scheduler_interval_minutes,
-        id="s3_parquet_analysis_hourly_rewrite",
+        minutes=settings.parquet_analysis_interval_minutes,
+        id=PARQUET_ANALYSIS_JOB_ID,
         coalesce=True,
         max_instances=1,
         replace_existing=True,
+        next_run_time=datetime.now(timezone.utc),
     )
     _scheduler.start()
-    logger.info("scheduler: started, interval=%d minutes", settings.scheduler_interval_minutes)
+    logger.info(
+        "scheduler: started, pipeline_interval=%d minutes, parquet_analysis_interval=%d minutes",
+        settings.scheduler_interval_minutes,
+        settings.parquet_analysis_interval_minutes,
+    )
     return _scheduler
 
 

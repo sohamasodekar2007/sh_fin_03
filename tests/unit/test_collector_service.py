@@ -15,6 +15,7 @@ from services.collector.collector_service import (
 # what's actually relevant to it, not repeat all nine mocks inline.
 NEW_COLLECTOR_PATCHES = (
     "services.collector.collector_service.VPCCollector",
+    "services.collector.collector_service.SecurityGroupCollector",
     "services.collector.collector_service.S3Collector",
     "services.collector.collector_service.RDSCollector",
     "services.collector.collector_service.LambdaCollector",

@@ -18,6 +18,7 @@ export type ProposalStatus =
   | "proposed"
   | "pending_approval"
   | "approved"
+  | "queued_for_execution"
   | "rejected"
   | "blocked"
   | "executed"
@@ -67,6 +68,7 @@ export interface Proposal {
   cost_current_monthly?: string;
   cost_optimized_monthly?: string;
   savings_annual?: string;
+  created_at?: string | null;
   approved_at?: string | null;
   approved_by?: string | null;
   rejected_at?: string | null;
@@ -299,6 +301,50 @@ export interface ResourceItem {
 }
 
 // ---------------------------------------------------------------------------
+// Resource detail — GET /v1/resources/{resource_id} (apps/api/routers/
+// resources.py's ResourceDetail). Everything known about one resource:
+// the FOCUS cost rows that actually reference it (not just the single
+// monthly_cost_usd figure ResourceItem carries), its CloudWatch-derived
+// utilization metric if collected, and any proposal whose resource_arn
+// ends in this id.
+// ---------------------------------------------------------------------------
+
+export interface ResourceCostPoint {
+  date: string;
+  billed_cost: number;
+}
+
+export interface ResourceChargeBreakdownItem {
+  charge_description: string;
+  charge_category: string;
+  billed_cost: number;
+  row_count: number;
+}
+
+export interface ResourceUtilizationMetric {
+  metric_id: string;
+  resource_id: string;
+  tenant_id: string;
+  window_start: string;
+  window_end: string;
+  cpu_p95: number | null;
+  cpu_avg: number | null;
+  mem_p95: number | null;
+  network_p95_bytes: number | null;
+  sample_count: number;
+}
+
+export interface ResourceDetail {
+  resource: ResourceItem;
+  metric: ResourceUtilizationMetric | null;
+  cost_trend: ResourceCostPoint[];
+  charge_breakdown: ResourceChargeBreakdownItem[];
+  focus_dataset_id: string | null;
+  focus_row_count: number;
+  related_proposals: Proposal[];
+}
+
+// ---------------------------------------------------------------------------
 // Connected accounts — GET /v1/cloud-accounts (ConnectedAccountSummary in
 // apps/api/routers/accounts_runs.py). Deliberately slim — no secret fields
 // exist on this contract at all, unlike the full CloudAccount model.
@@ -491,6 +537,7 @@ export interface ParquetAnalysis {
   converter: {
     cadence_minutes: number;
     scheduler_interval_minutes: number;
+    parquet_analysis_interval_minutes?: number;
     s3_configured: boolean;
     bucket: string | null;
     prefix: string;

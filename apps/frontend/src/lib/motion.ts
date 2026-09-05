@@ -35,7 +35,6 @@ export function useCountUp(target: number, duration = 1400, delay = 0): number {
       clearTimeout(timer);
       cancelAnimationFrame(raf);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [duration, delay]);
 
   // If the target changes after the initial count-up, glide to it.

@@ -178,3 +178,31 @@ def test_max_risk_ceiling_not_exceeded_has_no_effect():
     p = proposals[0]
     assert p["risk_level"] == "low"
     assert p["requires_human_approval"] is False
+
+
+def test_service_configuration_finding_becomes_audit_review_proposal():
+    resource = {
+        "resource_id": "cloudcare-demo-orders",
+        "environment": "dev",
+        "region": "ap-south-1",
+        "resource_type": "dynamodb_table",
+        "monthly_cost_usd": 0.0,
+        "tags": {"Environment": "dev"},
+    }
+    finding = {
+        "resource_id": "cloudcare-demo-orders",
+        "rule_id": "dynamodb.pitr_disabled.v1",
+        "confidence": 0.93,
+        "evidence": {"point_in_time_recovery_enabled": False},
+    }
+
+    proposals = build_proposals(_observation(resource), [finding])
+
+    assert len(proposals) == 1
+    p = proposals[0]
+    assert p["action_type"] == "review_finding"
+    assert p["template_id"] == "aws.audit_review.v1"
+    assert p["parameters"]["resource_id"] == "cloudcare-demo-orders"
+    assert p["parameters"]["resource_type"] == "dynamodb_table"
+    assert p["parameters"]["rule_id"] == "dynamodb.pitr_disabled.v1"
+    assert float(p["expected_monthly_savings"]) == 0.0

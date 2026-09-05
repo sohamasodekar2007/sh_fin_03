@@ -44,9 +44,13 @@ from typing import Any
 from packages.schemas.focus import FocusDataset, FocusRecord
 from services.analyzer.models import EBSVolume, MetricSample
 from services.analyzer.rules import (
+    classify_dynamodb_configuration,
     classify_idle,
+    classify_lambda_configuration,
     classify_nonprod_schedule,
     classify_over_provisioned,
+    classify_rds_configuration,
+    classify_security_group_ingress,
     classify_spend_anomaly,
     classify_unattached_ebs,
 )
@@ -90,12 +94,15 @@ def analyze_observation(
     if isinstance(observation, FocusDataset):
         dataset = observation
         metrics_by_resource = _index_metrics(resource_metrics or [])
+        resource_configs = _resource_configs_from_focus(dataset)
     elif isinstance(observation, dict) and "records" in observation:
         dataset = FocusDataset(**observation)
         metrics_by_resource = _index_metrics(resource_metrics or [])
+        resource_configs = _resource_configs_from_focus(dataset)
     elif isinstance(observation, dict):
         dataset, legacy_metrics = _convert_legacy_snapshot(observation)
         metrics_by_resource = _index_metrics(resource_metrics) if resource_metrics else legacy_metrics
+        resource_configs = _resource_configs_from_snapshot(observation)
         # Phase 15 — dependency_context (ASG/LB/termination-protection/
         # missing-ownership) lives on the raw CloudSnapshot resource dicts
         # the collector produced, not on FocusRecord — real AWS billing
@@ -112,7 +119,9 @@ def analyze_observation(
     else:
         raise TypeError(f"Unsupported observation type: {type(observation)!r}")
 
-    return _analyze(dataset, metrics_by_resource, dependency_context_by_resource)
+    findings = _analyze(dataset, metrics_by_resource, dependency_context_by_resource)
+    findings.extend(_analyze_resource_configurations(resource_configs, dataset))
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +286,63 @@ def _focus_citation(representative: FocusRecord) -> dict[str, Any]:
     }
 
 
+def _representative_records_by_resource(dataset: FocusDataset) -> dict[str, FocusRecord]:
+    grouped: dict[str, list[FocusRecord]] = defaultdict(list)
+    for record in dataset.records:
+        if record.ResourceId:
+            grouped[record.ResourceId].append(record)
+    return {
+        resource_id: max(records, key=lambda record: record.ChargePeriodStart)
+        for resource_id, records in grouped.items()
+    }
+
+
+def _resource_configs_from_focus(dataset: FocusDataset) -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    for resource_id, record in _representative_records_by_resource(dataset).items():
+        extensions = record.extensions or {}
+        configs.append(
+            {
+                "resource_id": resource_id,
+                "resource_type": record.ResourceType,
+                "name": record.ResourceName or resource_id,
+                "region": record.RegionId,
+                "environment": _environment_from_tags(record.Tags or {}),
+                "tags": record.Tags or {},
+                "state": extensions.get("x_resource_state"),
+                "engine": extensions.get("x_engine"),
+                "storage_encrypted": extensions.get("x_storage_encrypted"),
+                "publicly_accessible": extensions.get("x_publicly_accessible"),
+                "multi_az": extensions.get("x_multi_az"),
+                "deletion_protection": extensions.get("x_deletion_protection"),
+                "billing_mode": extensions.get("x_billing_mode"),
+                "point_in_time_recovery_enabled": extensions.get("x_point_in_time_recovery_enabled"),
+                "runtime": extensions.get("x_runtime"),
+                "timeout_seconds": extensions.get("x_timeout_seconds"),
+                "memory_size_mb": extensions.get("x_memory_size_mb"),
+                "vpc_config_present": extensions.get("x_vpc_config_present"),
+                "vpc_id": extensions.get("x_vpc_id"),
+                "ingress_rules": extensions.get("x_ingress_rules") or [],
+                "focus_record": record,
+            }
+        )
+    return configs
+
+
+def _resource_configs_from_snapshot(observation: dict[str, Any]) -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    for resource in observation.get("resources", []):
+        config = dict(resource)
+        config["resource_id"] = resource.get("resource_id") or resource.get("instance_id") or resource.get("id")
+        dep_ctx = resource.get("dependency_context") or {}
+        if "multi_az" not in config:
+            config["multi_az"] = dep_ctx.get("multi_az")
+        if "deletion_protection" not in config:
+            config["deletion_protection"] = dep_ctx.get("deletion_protection")
+        configs.append(config)
+    return configs
+
+
 def _enrich(
     finding,
     resource_id: str,
@@ -293,6 +359,48 @@ def _enrich(
     # reads it independently, straight off the resource dict it's given).
     doc["dependency_context"] = dependency_context or {}
     return doc
+
+
+def _enrich_configuration_finding(
+    finding,
+    resource: dict[str, Any],
+    dataset: FocusDataset,
+) -> dict[str, Any]:
+    focus_record = resource.get("focus_record")
+    if isinstance(focus_record, FocusRecord):
+        provenance = _provenance(focus_record, dataset, [focus_record])
+        citation = _focus_citation(focus_record)
+    else:
+        provenance = {
+            "provider": "aws",
+            "service_name": resource.get("resource_type"),
+            "service_category": None,
+            "billed_cost_30d": 0.0,
+            "focus_dataset_id": dataset.dataset_id,
+        }
+        citation = {"ResourceId": resource.get("resource_id"), "ProviderName": "AWS"}
+    return _enrich(finding, str(resource.get("resource_id")), provenance, citation, resource.get("dependency_context"))
+
+
+def _analyze_resource_configurations(
+    resources: list[dict[str, Any]],
+    dataset: FocusDataset,
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for resource in resources:
+        resource_type = resource.get("resource_type")
+        classifiers = []
+        if resource_type == "rds_instance":
+            classifiers = classify_rds_configuration(resource)
+        elif resource_type == "dynamodb_table":
+            classifiers = classify_dynamodb_configuration(resource)
+        elif resource_type == "lambda_function":
+            classifiers = classify_lambda_configuration(resource)
+        elif resource_type == "security_group":
+            classifiers = classify_security_group_ingress(resource)
+        for finding in classifiers:
+            findings.append(_enrich_configuration_finding(finding, resource, dataset))
+    return findings
 
 
 def _analyze(

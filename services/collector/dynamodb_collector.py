@@ -26,6 +26,7 @@ def normalize_table(
     tags: dict[str, str],
     region: str,
     collected_at: datetime,
+    point_in_time_recovery_enabled: bool | None = None,
 ) -> DynamoDBTableResourceRecord:
     resource_id = description["TableName"]
     environment = normalize_environment(tags)
@@ -45,6 +46,8 @@ def normalize_table(
         name=resource_id,
         environment=environment,
         instance_type=billing_mode,
+        billing_mode=billing_mode,
+        point_in_time_recovery_enabled=point_in_time_recovery_enabled,
         state=str(description.get("TableStatus", "unknown")).lower(),
         launched_at=description.get("CreationDateTime"),
         collected_at=collected_at,
@@ -72,12 +75,24 @@ class DynamoDBCollector:
             for table_name in table_names:
                 description = ddb.describe_table(TableName=table_name)["Table"]
                 tags = _table_tags(ddb, description.get("TableArn", ""))
+                pitr_enabled: bool | None = None
+                try:
+                    backup = ddb.describe_continuous_backups(TableName=table_name)
+                    pitr_enabled = (
+                        backup.get("ContinuousBackupsDescription", {})
+                        .get("PointInTimeRecoveryDescription", {})
+                        .get("PointInTimeRecoveryStatus")
+                        == "ENABLED"
+                    )
+                except ClientError:
+                    pitr_enabled = None
                 tables.append(
                     normalize_table(
                         description=description,
                         tags=tags,
                         region=self.region,
                         collected_at=collected_at,
+                        point_in_time_recovery_enabled=pitr_enabled,
                     )
                 )
         except ClientError as error:

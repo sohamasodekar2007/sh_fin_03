@@ -124,3 +124,103 @@ export interface UnitEconomicsSummary {
   all_margins: MarginResult[];
   negative_margins: MarginResult[];
 }
+
+// ---------------------------------------------------------------------------
+// Forecast Anomaly Guard — cloudcare-fintech-addons/forecast_anomaly/schemas.py
+// "Did today's actual cost land significantly above what was predicted for
+// it" — walk-forward, complementary to the trailing-mean anomaly rule
+// already in services/analyzer/rules.py, not a replacement for it.
+// ---------------------------------------------------------------------------
+
+export interface ForecastComparison {
+  date: string;
+  predicted_cost: number;
+  actual_cost: number;
+  overage_pct: number;
+  severity: FinopsSeverity | "normal";
+  is_anomaly: boolean;
+  rationale: string;
+}
+
+// ---------------------------------------------------------------------------
+// Team Attribution — cloudcare-fintech-addons/team_attribution/schemas.py
+// ---------------------------------------------------------------------------
+
+export interface TeamCostSummary {
+  team: string;
+  resource_count: number;
+  total_monthly_cost: number;
+  environments: string[];
+}
+
+export interface UntaggedResource {
+  resource_id: string;
+  resource_type: string;
+  monthly_cost: number;
+  environment: string | null;
+}
+
+export interface TeamAttributionReport {
+  tag_key: string;
+  teams: TeamCostSummary[];
+  untagged_resources: UntaggedResource[];
+  untagged_cost: number;
+  untagged_pct: number;
+  total_cost: number;
+  rationale: string;
+}
+
+// ---------------------------------------------------------------------------
+// Security Policy Add-ons — cloudcare-fintech-addons/security_policy_addons/
+// Audit-only findings: open security-group ingress, unencrypted storage,
+// public S3 exposure, stale IAM access keys.
+// ---------------------------------------------------------------------------
+
+export interface SecurityPolicyFinding {
+  finding_id: string;
+  rule_id: string;
+  severity: FinopsSeverity;
+  resource_id: string;
+  resource_type: string;
+  summary: string;
+  evidence: Record<string, unknown>;
+  rationale: string;
+  detected_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// AWS Trusted Services — cloudcare-fintech-addons/aws_trusted_services/
+// ---------------------------------------------------------------------------
+
+export interface UnapprovedServiceFinding {
+  service: string;
+  resource_count: number;
+  monthly_cost: number;
+  rationale: string;
+}
+
+export interface TrustedServicesReport {
+  approved_services: string[];
+  unapproved: UnapprovedServiceFinding[];
+  unapproved_cost: number;
+  unapproved_pct: number;
+  total_cost: number;
+  rationale: string;
+}
+
+export type TrustPillar = "cost_optimization" | "security" | "fault_tolerance" | "service_limits";
+
+export interface PillarScore {
+  pillar: TrustPillar;
+  score: number;
+  finding_count: number;
+  critical_count: number;
+  rationale: string;
+}
+
+export interface TrustScorecard {
+  pillars: PillarScore[];
+  overall_score: number;
+  overall_grade: "A" | "B" | "C" | "D" | "F";
+  rationale: string;
+}

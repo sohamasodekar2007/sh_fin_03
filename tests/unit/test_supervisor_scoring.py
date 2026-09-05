@@ -60,7 +60,7 @@ def test_non_production_low_risk_owned_resource_can_be_auto_approved():
 
 
 def test_unknown_action_template_is_blocked():
-    proposal = _proposal(action_type="resize_instance", template_id="ec2.resize.v1")
+    proposal = _proposal(action_type="resize_instance", template_id="ec2.unknown.v1")
 
     outcome, reason_codes = evaluate_policy_outcome(
         proposal, tenant_id="demo-tenant", environment_long="development", has_owner_tag=True, is_protected=False

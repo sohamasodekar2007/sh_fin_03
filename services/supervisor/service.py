@@ -41,15 +41,12 @@ auto_approved | needs_approval | blocked, computed by wrapping the
 existing services/policy/engine.py through services/policy/policy_adapter.py
 and services/orchestrator/legacy/supervisor_node.py's build_supervisor_node
 — real, tested code that existed before this phase but was never wired to
-a route. PolicyAdapter's own ALLOWED_ACTION_TEMPLATES is stricter than the
-engine's (ec2.stop.v1 only, matching SimulatedExecutor's SUPPORTED_TEMPLATES),
-so resize/schedule proposals correctly come back "blocked" — nothing in
-this build can execute them, so leaving them "pending" forever would be
-dishonest. Production NEVER comes back "auto_approved" — PolicyAdapter
-forces "needs_approval" (human_review) for environment=="production"
-unconditionally, ahead of every other check. This is informational only:
-it explains WHY a proposal is pending/blocked, it never skips the human
-click (see module docstring above).
+a route. PolicyAdapter only allows templates that this build recognizes;
+unknown templates come back "blocked". Production NEVER comes back
+"auto_approved" — PolicyAdapter forces "needs_approval" (human_review) for
+environment=="production" unconditionally, ahead of every other check. This
+is informational only: it explains WHY a proposal is pending/blocked, it
+never skips the human click (see module docstring above).
 """
 
 from __future__ import annotations
@@ -254,8 +251,10 @@ def evaluate_policy_outcome(
         tenant_id=tenant_id,
         snapshot_id=proposal.get("resource_arn", "unknown"),
         resource_id=(proposal.get("parameters") or {}).get("instance_id")
-        or (proposal.get("parameters") or {}).get("volume_id", "unknown"),
-        resource_type="ebs_volume" if proposal["action_type"] == "delete_volume" else "ec2_instance",
+        or (proposal.get("parameters") or {}).get("volume_id")
+        or (proposal.get("parameters") or {}).get("resource_id", "unknown"),
+        resource_type=(proposal.get("parameters") or {}).get("resource_type")
+        or ("ebs_volume" if proposal["action_type"] == "delete_volume" else "ec2_instance"),
         action_template=proposal["template_id"],
         environment=environment_long if environment_long in ("development", "staging", "production") else "unknown",
         risk_level=proposal["risk_level"] if proposal["risk_level"] in ("low", "medium", "high") else "high",
@@ -368,7 +367,7 @@ async def run_supervisor_step(
 
         for p in proposals:
             params = p.get("parameters") or {}
-            target_resource_id = params.get("instance_id") or params.get("volume_id", "")
+            target_resource_id = params.get("instance_id") or params.get("volume_id") or params.get("resource_id", "")
             resource = resources_by_id.get(target_resource_id)
             tags = tags_by_resource.get(target_resource_id, {})
             has_owner_tag = bool(tags.get("Owner") or tags.get("owner"))

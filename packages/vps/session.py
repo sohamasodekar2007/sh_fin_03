@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 CONNECT_TIMEOUT_SECONDS = 30
 MAX_CONNECT_RETRIES = 3
 
-_KEY_CLASSES = (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey, paramiko.DSSKey)
+_KEY_CLASSES = tuple(
+    key_cls
+    for name in ("Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey")
+    if (key_cls := getattr(paramiko, name, None)) is not None
+)
 
 
 class VPSConnectionError(Exception):

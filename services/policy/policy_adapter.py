@@ -27,6 +27,7 @@ class PolicyAdapter:
         # Phase 15
         "asg.adjust_capacity.v1",
         "ec2.no_action.v1",
+        "aws.audit_review.v1",
     }
 
     def __init__(

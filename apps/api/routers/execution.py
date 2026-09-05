@@ -15,6 +15,7 @@ from apps.api.db import get_db
 from apps.api.dependencies import CurrentUser
 from packages.schemas.execution import LiveExecutionRecord
 from services.executor.actions import ExecutionRefused, assumed_write_session, execute_action, execute_rollback
+from services.messaging.sqs_execution_queue import build_execution_message, enqueue_execution_message, sqs_execution_configured
 from services.notifications.email import send_completion_email_sync
 from services.verifier.health import verify_execution
 
@@ -40,9 +41,15 @@ async def _record_from_doc(doc: dict[str, Any]) -> LiveExecutionRecord:
     return LiveExecutionRecord(**doc)
 
 
-async def _dispatch_completion_email(
+async def dispatch_completion_email(
     db, background_tasks: BackgroundTasks | None, tenant_id: str, proposal_doc: dict[str, Any], record: LiveExecutionRecord
 ) -> None:
+    """Public (no leading underscore) because apps/api/routers/supervisor.py's
+    _execute_after_approval also needs it — the approve-via-dashboard and
+    approve-via-email-link flows execute through that function, not through
+    POST /v1/execute/{proposal_id} below, so without this shared call a
+    completion email only ever fired for a code path nothing in the app
+    actually uses."""
     settings = get_settings()
     recipient = await db.users.find_one({"tenant_id": tenant_id}, {"_id": 0, "email": 1})
     to_email = (recipient or {}).get("email")
@@ -76,6 +83,22 @@ async def execute_proposal(
         raise HTTPException(status_code=404, detail="Proposal not found")
     proposal_doc.pop("_id", None)
 
+    settings = get_settings()
+    if sqs_execution_configured(settings):
+        message = build_execution_message(
+            proposal_id=proposal_id,
+            tenant_id=tenant_id,
+            run_id=proposal_id,
+            requested_by=current_user["user_id"],
+            source="manual_execute_endpoint",
+        )
+        receipt = await enqueue_execution_message(db, message)
+        await db.proposals.update_one(
+            {"proposal_id": proposal_id, "tenant_id": tenant_id},
+            {"$set": {"status": "queued_for_execution", "execution_queue_message_id": receipt.get("message_id")}},
+        )
+        return {"execution": {"status": "queued", "queue_message_id": receipt.get("message_id")}, "verification": None}
+
     record = await execute_action(db, proposal_doc, run_id=proposal_id)
 
     verification: dict[str, Any] | None = None
@@ -97,7 +120,7 @@ async def execute_proposal(
     )
 
     if record.status in ("executed", "no_op"):
-        await _dispatch_completion_email(db, background_tasks, tenant_id, proposal_doc, record)
+        await dispatch_completion_email(db, background_tasks, tenant_id, proposal_doc, record)
 
     return {"execution": record.model_dump(mode="json"), "verification": verification}
 

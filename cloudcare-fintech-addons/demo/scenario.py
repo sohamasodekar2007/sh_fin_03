@@ -132,3 +132,76 @@ def build_cost_attribution_scenario() -> tuple[list[CostSample], list[CostSample
 
 def build_unit_economics_scenario(period: str = "2026-09-05"):
     return generate_merchant_samples(period)
+
+
+def build_daily_cost_history(*, days: int = 21, seed: int = 5) -> list[dict]:
+    """21 days of daily cost, flat-ish with weekday seasonality, ending in
+    a genuine spike on the final day — same "recursive retry storm"
+    narrative as the spend-velocity scenario, but at daily granularity so
+    ForecastAnomalyGuard's walk-forward evaluation has something real to
+    flag on the last day without leaking that spike into its own forecast."""
+    rng = random.Random(seed)
+    start = SCENARIO_NOW.date() - timedelta(days=days - 1)
+    points = []
+    for i in range(days):
+        d = start + timedelta(days=i)
+        is_weekend = d.weekday() >= 5
+        base = 850.0 if is_weekend else 1_000.0
+        cost = max(0.0, rng.gauss(base, base * 0.06))
+        if i == days - 1:
+            cost *= 1.8  # the day the anomaly guard should catch
+        points.append({"date": d.isoformat(), "actual_cost": round(cost, 2)})
+    return points
+
+
+def build_team_attribution_scenario() -> list[dict]:
+    """Five resources across three teams, plus two deliberately untagged
+    ones — the "governance gap" the report's own rationale calls out."""
+    return [
+        {"resource_id": "i-081a", "resource_type": "ec2", "environment": "production", "monthly_cost": 420.0, "tags": {"team": "payments", "Environment": "production"}},
+        {"resource_id": "i-0c3f", "resource_type": "ec2", "environment": "staging", "monthly_cost": 90.0, "tags": {"Team": "payments", "Environment": "staging"}},
+        {"resource_id": "db-risk-1", "resource_type": "rds", "environment": "production", "monthly_cost": 610.0, "tags": {"team": "risk", "Environment": "production"}},
+        {"resource_id": "bucket-analytics", "resource_type": "s3", "environment": "production", "monthly_cost": 75.0, "tags": {"team": "analytics"}},
+        {"resource_id": "i-0f91-legacy", "resource_type": "ec2", "environment": "production", "monthly_cost": 260.0, "tags": {}},
+        {"resource_id": "vol-orphaned", "resource_type": "ebs_volume", "environment": None, "monthly_cost": 38.0, "tags": {"Owner": "unknown"}},
+    ]
+
+
+def build_trusted_services_scenario() -> tuple[list[dict], list[str]]:
+    """Approved list matches a typical mid-size fintech's real footprint;
+    Redshift and a lone EMR cluster are the deliberate "shadow IT" cases."""
+    usage = [
+        {"service": "ec2", "resource_count": 42, "monthly_cost": 3_200.0},
+        {"service": "rds", "resource_count": 6, "monthly_cost": 1_850.0},
+        {"service": "s3", "resource_count": 18, "monthly_cost": 410.0},
+        {"service": "lambda", "resource_count": 30, "monthly_cost": 190.0},
+        {"service": "redshift", "resource_count": 1, "monthly_cost": 2_400.0},
+        {"service": "emr", "resource_count": 1, "monthly_cost": 980.0},
+    ]
+    approved_services = ["ec2", "rds", "s3", "lambda", "cloudwatch", "iam"]
+    return usage, approved_services
+
+
+def build_security_policy_addons_scenario() -> dict:
+    """Deliberately a mix: some clean, some flagged, across all four
+    checks — so the demo shows both "found nothing" and "found something"
+    states, not just a wall of findings."""
+    return {
+        "security_group_rules": [
+            {"security_group_id": "sg-web", "port": 22, "protocol": "tcp", "cidr": "0.0.0.0/0"},
+            {"security_group_id": "sg-db", "port": 5432, "protocol": "tcp", "cidr": "10.0.4.0/24"},
+            {"security_group_id": "sg-legacy", "port": 3389, "protocol": "tcp", "cidr": "0.0.0.0/0"},
+        ],
+        "storage_resources": [
+            {"resource_id": "vol-0a1b", "resource_type": "ebs_volume", "encrypted": True},
+            {"resource_id": "db-legacy-1", "resource_type": "rds_instance", "encrypted": False},
+        ],
+        "s3_buckets": [
+            {"bucket": "cloudcare-assets", "public_access_block_enabled": True, "acl_is_public": False},
+            {"bucket": "cloudcare-exports-legacy", "public_access_block_enabled": False, "acl_is_public": False},
+        ],
+        "access_keys": [
+            {"principal_name": "svc-ingest", "access_key_id": "AKIA-INGEST", "age_days": 40},
+            {"principal_name": "ops.jsmith", "access_key_id": "AKIA-JSMITH", "age_days": 210},
+        ],
+    }

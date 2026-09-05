@@ -6,6 +6,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolves to the monorepo root .env regardless of the folder uvicorn is launched from
 _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
+_DEFAULT_CORS_ORIGINS = (
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "https://sh-fin-03.vercel.app",
+)
+
+
+def _normalize_origin(origin: str | None) -> str:
+    return str(origin or "").strip().strip("\"'").rstrip("/")
 
 
 class Settings(BaseSettings):
@@ -23,6 +33,7 @@ class Settings(BaseSettings):
 
     app_env: Literal["development", "test", "production"] = "development"
     cors_origins: str = "http://localhost:3000,http://localhost:3001"
+    cors_origin_regex: str | None = r"https://.*\.vercel\.app"
 
     # MongoDB — PLACEHOLDER until you create a real Atlas cluster
     mongodb_uri: str = "mongodb://localhost:27017"
@@ -62,6 +73,16 @@ class Settings(BaseSettings):
     # services/collector/aws_session.py). Only services/executor/actions.py
     # assumes this one. Never widen the read role instead of setting this.
     aws_write_role_arn: str = ""
+
+    # SQS execution queue. Disabled by default so local development keeps the
+    # existing synchronous approval -> executor path. Enable in production when
+    # approved actions should be picked up by worker processes.
+    sqs_execution_enabled: bool = False
+    sqs_execution_queue_url: str = ""
+    sqs_endpoint_url: str = ""
+    sqs_wait_time_seconds: int = 20
+    sqs_visibility_timeout_seconds: int = 300
+    sqs_max_messages: int = 5
 
     # Real FOCUS 1.0 Data Export (optional — synthesis from CloudSnapshot is the fallback)
     focus_version: str = "1.2"
@@ -131,6 +152,7 @@ class Settings(BaseSettings):
     # Scheduler — hourly monitor -> analyzer -> decision -> supervisor pipeline
     scheduler_enabled: bool = True
     scheduler_interval_minutes: int = 60
+    parquet_analysis_interval_minutes: int = 60
 
     # Phase 14 — Multi-Service Awareness (services/phase14/). One flag per
     # concern, matching the existing scheduler_enabled/execution_enabled
@@ -144,7 +166,17 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        origins: list[str] = []
+        for origin in (
+            *self.cors_origins.split(","),
+            self.app_base_url,
+            self.webauthn_origin,
+            *_DEFAULT_CORS_ORIGINS,
+        ):
+            normalized = _normalize_origin(origin)
+            if normalized and normalized not in origins:
+                origins.append(normalized)
+        return origins
 
 
 @lru_cache

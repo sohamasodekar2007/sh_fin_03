@@ -13,25 +13,40 @@ import type {
   ParquetAnalysis,
   Proposal,
   RDSRecommendationsResponse,
+  ResourceDetail,
   ResourceItem,
   S3RecommendationsResponse,
   SecurityFindingsResponse,
 } from "@/lib/cloudcare-data";
-import type { CostBreakdown, SpendSeriesPoint, UnitEconomicsSummary, VelocityAlert } from "@/lib/finops-api";
+import type {
+  CostBreakdown,
+  ForecastComparison,
+  SecurityPolicyFinding,
+  SpendSeriesPoint,
+  TeamAttributionReport,
+  TrustedServicesReport,
+  TrustScorecard,
+  UnitEconomicsSummary,
+  VelocityAlert,
+} from "@/lib/finops-api";
 
 /**
  * TanStack Query hooks for the dashboard. Operational surfaces poll on a
  * short interval so dashboard state follows the local backend/add-on APIs.
  */
 
-export function useProposals() {
+export function useProposals(options: { refetchInterval?: number | false } = {}) {
   return useQuery({
     queryKey: ["proposals"],
     // status="" (empty string) is falsy on the backend's `if status:`
     // check (apps/api/routers/supervisor.py's list_approvals) — the one
     // documented way to get every status back, not just pending.
     queryFn: () => api.get<Proposal[]>("/v1/approvals?status="),
-    refetchInterval: 10_000,
+    refetchInterval: options.refetchInterval ?? 10_000,
+    refetchIntervalInBackground: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   });
 }
 
@@ -59,7 +74,10 @@ export function useAgentActivity(limit = 50) {
   });
 }
 
-export function useResources(filters?: { environment?: string; status?: string }) {
+export function useResources(
+  filters?: { environment?: string; status?: string },
+  options: { refetchInterval?: number | false } = {},
+) {
   const params = new URLSearchParams();
   if (filters?.environment) params.set("environment", filters.environment);
   if (filters?.status) params.set("status", filters.status);
@@ -67,7 +85,24 @@ export function useResources(filters?: { environment?: string; status?: string }
   return useQuery({
     queryKey: ["resources", filters?.environment ?? null, filters?.status ?? null],
     queryFn: () => api.get<ResourceItem[]>(`/v1/resources${qs ? `?${qs}` : ""}`),
-    refetchInterval: 10_000,
+    refetchInterval: options.refetchInterval ?? 10_000,
+    refetchIntervalInBackground: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+  });
+}
+
+export function useResourceDetail(resourceId: string | null) {
+  return useQuery({
+    queryKey: ["resource-detail", resourceId],
+    queryFn: () => api.get<ResourceDetail>(`/v1/resources/${encodeURIComponent(resourceId as string)}`),
+    enabled: resourceId != null,
+    // 30s while the detail sheet is open — the same 15-min collector cycle
+    // backs it, but a shorter poll here means a resource that just got a
+    // new proposal or execution shows up without the viewer closing and
+    // reopening the sheet.
+    refetchInterval: 30_000,
   });
 }
 
@@ -169,6 +204,46 @@ export function useUnitEconomics() {
     queryFn: () => addonApi.get<UnitEconomicsSummary>("/unit-economics/demo-summary"),
     refetchInterval: 15_000,
     refetchIntervalInBackground: true,
+    retry: false,
+  });
+}
+
+export function useForecastAnomaly() {
+  return useQuery({
+    queryKey: ["finops-forecast-anomaly"],
+    queryFn: () => addonApi.get<ForecastComparison[]>("/forecast-anomaly/demo-series"),
+    retry: false,
+  });
+}
+
+export function useTeamAttribution(tagKey = "team") {
+  return useQuery({
+    queryKey: ["finops-team-attribution", tagKey],
+    queryFn: () => addonApi.get<TeamAttributionReport>(`/team-attribution/demo-report?tag_key=${encodeURIComponent(tagKey)}`),
+    retry: false,
+  });
+}
+
+export function useSecurityPolicyAddons() {
+  return useQuery({
+    queryKey: ["finops-security-policy-addons"],
+    queryFn: () => addonApi.get<{ findings: SecurityPolicyFinding[] }>("/security-policy-addons/demo-findings"),
+    retry: false,
+  });
+}
+
+export function useTrustedServicesAllowlist() {
+  return useQuery({
+    queryKey: ["finops-trusted-services-allowlist"],
+    queryFn: () => addonApi.get<TrustedServicesReport>("/aws-trusted-services/demo-allowlist-report"),
+    retry: false,
+  });
+}
+
+export function useTrustScorecard() {
+  return useQuery({
+    queryKey: ["finops-trust-scorecard"],
+    queryFn: () => addonApi.get<TrustScorecard>("/aws-trusted-services/demo-scorecard"),
     retry: false,
   });
 }

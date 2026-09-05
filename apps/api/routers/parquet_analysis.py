@@ -62,6 +62,7 @@ def _converter_plan(settings) -> dict[str, Any]:
     return {
         "cadence_minutes": 60,
         "scheduler_interval_minutes": settings.scheduler_interval_minutes,
+        "parquet_analysis_interval_minutes": settings.parquet_analysis_interval_minutes,
         "s3_configured": bool(bucket),
         "bucket": bucket or None,
         "prefix": prefix,
